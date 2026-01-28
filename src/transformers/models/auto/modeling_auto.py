@@ -441,6 +441,8 @@ MODEL_MAPPING_NAMES = OrderedDict(
         ("vjepa2", "VJEPA2Model"),
         ("voxtral", "VoxtralForConditionalGeneration"),
         ("voxtral_encoder", "VoxtralEncoder"),
+        ("voxtral_streaming", "VoxtralStreamingForConditionalGeneration"),
+        ("voxtral_streaming_encoder", "VoxtralStreamingEncoder"),
         ("wav2vec2", "Wav2Vec2Model"),
         ("wav2vec2-bert", "Wav2Vec2BertModel"),
         ("wav2vec2-conformer", "Wav2Vec2ConformerModel"),
@@ -544,6 +546,7 @@ MODEL_FOR_PRETRAINING_MAPPING_NAMES = OrderedDict(
         ("visual_bert", "VisualBertForPreTraining"),
         ("vit_mae", "ViTMAEForPreTraining"),
         ("voxtral", "VoxtralForConditionalGeneration"),
+        ("voxtral_streaming", "VoxtralStreamingForConditionalGeneration"),
         ("wav2vec2", "Wav2Vec2ForPreTraining"),
         ("wav2vec2-conformer", "Wav2Vec2ConformerForPreTraining"),
         ("xlm", "XLMWithLMHeadModel"),
@@ -975,6 +978,7 @@ MODEL_FOR_MULTIMODAL_LM_MAPPING_NAMES = OrderedDict(
         ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),
         ("qwen3_omni_moe", "Qwen3OmniMoeForConditionalGeneration"),
         ("voxtral", "VoxtralForConditionalGeneration"),
+        ("voxtral_streaming", "VoxtralStreamingForConditionalGeneration"),
     ]
 )
 
@@ -1098,6 +1102,7 @@ MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES = OrderedDict(
         ("t5gemma2", "T5Gemma2ForConditionalGeneration"),
         ("umt5", "UMT5ForConditionalGeneration"),
         ("voxtral", "VoxtralForConditionalGeneration"),
+        ("voxtral_streaming", "VoxtralStreamingForConditionalGeneration"),
     ]
 )
 
