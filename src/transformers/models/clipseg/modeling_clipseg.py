@@ -29,8 +29,8 @@ from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
-from ...utils import ModelOutput, TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_int
-from ...utils.generic import is_flash_attention_requested
+from ...utils import ModelOutput, TransformersKwargs, auto_docstring, logging, torch_int
+from ...utils.generic import check_model_inputs, is_flash_attention_requested
 from .configuration_clipseg import CLIPSegConfig, CLIPSegTextConfig, CLIPSegVisionConfig
 
 
@@ -82,10 +82,7 @@ class CLIPSegOutput(ModelOutput):
     vision_model_output: BaseModelOutputWithPooling = None
 
     def to_tuple(self) -> tuple[Any]:
-        return tuple(
-            self[k] if k not in ["text_model_output", "vision_model_output"] else getattr(self, k).to_tuple()
-            for k in self.keys()
-        )
+        return tuple(v.to_tuple() if isinstance(v, ModelOutput) else v for v in self.values())
 
 
 @dataclass
@@ -127,10 +124,7 @@ class CLIPSegImageSegmentationOutput(ModelOutput):
     decoder_output: CLIPSegDecoderOutput = None
 
     def to_tuple(self) -> tuple[Any]:
-        return tuple(
-            self[k] if k not in ["vision_model_output", "decoder_output"] else getattr(self, k).to_tuple()
-            for k in self.keys()
-        )
+        return tuple(v.to_tuple() if isinstance(v, ModelOutput) else v for v in self.values())
 
 
 class CLIPSegVisionEmbeddings(nn.Module):
@@ -416,6 +410,10 @@ class CLIPSegPreTrainedModel(PreTrainedModel):
     base_model_prefix = "clip"
     input_modalities = ("image", "text")
     supports_gradient_checkpointing = True
+    _can_record_outputs = {
+        "hidden_states": CLIPSegEncoderLayer,
+        "attentions": CLIPSegAttention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -631,16 +629,14 @@ class CLIPSegTextModel(CLIPSegPreTrainedModel):
     def set_input_embeddings(self, value):
         self.text_model.embeddings.token_embedding = value
 
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPooling:
         r"""
         Examples:
@@ -661,9 +657,8 @@ class CLIPSegTextModel(CLIPSegPreTrainedModel):
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            return_dict=True,
+            **kwargs,
         )
 
 
@@ -733,6 +728,7 @@ class CLIPSegVisionModel(CLIPSegPreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
+    @check_model_inputs(tie_last_hidden_states=False)
     @auto_docstring
     def forward(
         self,
@@ -741,7 +737,7 @@ class CLIPSegVisionModel(CLIPSegPreTrainedModel):
         output_hidden_states: bool | None = None,
         interpolate_pos_encoding: bool | None = True,
         return_dict: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPooling:
         r"""
         Examples:
@@ -771,6 +767,7 @@ class CLIPSegVisionModel(CLIPSegPreTrainedModel):
             output_hidden_states=output_hidden_states,
             interpolate_pos_encoding=interpolate_pos_encoding,
             return_dict=return_dict,
+            **kwargs,
         )
 
 
@@ -814,7 +811,7 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @can_return_tuple
+    @check_model_inputs
     @auto_docstring
     def get_text_features(
         self,
@@ -841,7 +838,6 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            return_dict=True,
             **kwargs,
         )
         pooled_output = text_outputs.pooler_output
@@ -849,7 +845,7 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
 
         return text_outputs
 
-    @can_return_tuple
+    @check_model_inputs(tie_last_hidden_states=False)
     @auto_docstring
     def get_image_features(
         self,
@@ -879,7 +875,6 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
         vision_outputs: BaseModelOutputWithPooling = self.vision_model(
             pixel_values=pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
-            return_dict=True,
             **kwargs,
         )
         pooled_output = vision_outputs.pooler_output
@@ -887,6 +882,7 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
 
         return vision_outputs
 
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -895,11 +891,8 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         return_loss: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         interpolate_pos_encoding: bool = True,
-        return_dict: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | CLIPSegOutput:
         r"""
         return_loss (`bool`, *optional*):
@@ -927,35 +920,22 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
         >>> logits_per_image = outputs.logits_per_image  # this is the image-text similarity score
         >>> probs = logits_per_image.softmax(dim=1)  # we can take the softmax to get the label probabilities
         ```"""
-        # Use CLIPSEG model's config for some fields (if specified) instead of those of vision & text components.
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        vision_outputs = self.vision_model(
+        vision_outputs = self.get_image_features(
             pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             interpolate_pos_encoding=interpolate_pos_encoding,
-            return_dict=return_dict,
+            **kwargs,
         )
 
-        text_outputs = self.text_model(
+        text_outputs = self.get_text_features(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            **kwargs,
         )
 
-        image_embeds = vision_outputs[1]
-        image_embeds = self.visual_projection(image_embeds)
+        image_embeds = vision_outputs.pooler_output
 
-        text_embeds = text_outputs[1]
-        text_embeds = self.text_projection(text_embeds)
+        text_embeds = text_outputs.pooler_output
 
         # normalized features
         image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
@@ -969,10 +949,6 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
         loss = None
         if return_loss:
             loss = clipseg_loss(logits_per_text)
-
-        if not return_dict:
-            output = (logits_per_image, logits_per_text, text_embeds, image_embeds, text_outputs, vision_outputs)
-            return ((loss,) + output) if loss is not None else output
 
         return CLIPSegOutput(
             loss=loss,
@@ -1249,16 +1225,16 @@ class CLIPSegForImageSegmentation(CLIPSegPreTrainedModel):
 
         # step 1: forward the query images through the frozen CLIP vision encoder
         with torch.no_grad():
-            vision_outputs = self.clip.vision_model(
+            vision_outputs = self.clip.get_image_features(
                 pixel_values=pixel_values,
-                output_attentions=output_attentions,
-                output_hidden_states=True,  # we need the intermediate hidden states
                 interpolate_pos_encoding=interpolate_pos_encoding,
-                return_dict=return_dict,
+                output_attentions=output_attentions,
+                output_hidden_states=True,  # required for extract_layers
+                return_dict=True,
             )
-            pooled_output = self.clip.visual_projection(vision_outputs[1])
+            pooled_output = vision_outputs.pooler_output
 
-            hidden_states = vision_outputs.hidden_states if return_dict else vision_outputs[2]
+            hidden_states = vision_outputs.hidden_states
             # we add +1 here as the hidden states also include the initial embeddings
             activations = [hidden_states[i + 1] for i in self.extract_layers]
 
@@ -1313,6 +1289,10 @@ class CLIPSegForImageSegmentation(CLIPSegPreTrainedModel):
             loss = loss_fn(logits, labels)
 
         if not return_dict:
+            if isinstance(vision_outputs, ModelOutput):
+                vision_outputs = vision_outputs.to_tuple()
+            if isinstance(decoder_outputs, ModelOutput):
+                decoder_outputs = decoder_outputs.to_tuple()
             output = (logits, conditional_embeddings, pooled_output, vision_outputs, decoder_outputs)
             return ((loss,) + output) if loss is not None else output
 
