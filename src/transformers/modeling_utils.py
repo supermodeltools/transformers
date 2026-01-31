@@ -2292,6 +2292,20 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         else:
             # 0.02 is the standard default value across the library
             std = getattr(self.config.get_text_config(), "initializer_range", 0.02)
+        
+        if isinstance(module, nn.Conv1d):
+            if not hasattr(self.config, "_conv_config"):
+                self.config._conv_config = []
+            
+            self.config._conv_config.append({
+                "in_channels": module.in_channels,
+                "out_channels": module.out_channels,
+                "kernel_size": module.kernel_size[0],
+                "stride": module.stride[0],
+                "padding": module.padding[0],
+                "dilation": module.dilation[0],
+                "groups": module.groups,
+            })
 
         if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d)):
             if getattr(module, "weight", None) is not None:

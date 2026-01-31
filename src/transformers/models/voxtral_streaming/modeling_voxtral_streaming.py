@@ -19,6 +19,7 @@
 # limitations under the License.
 
 import math
+from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Optional
 
@@ -30,7 +31,7 @@ from ...activations import ACT2FN
 from ...cache_utils import Cache
 from ...generation import GenerationMixin
 from ...integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub, use_kernelized_func
-from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from ...masking_utils import create_causal_mask 
 from ...cache_utils import Cache, DynamicCache
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
@@ -391,6 +392,70 @@ class VoxtralStreamingPreTrainedModel(PreTrainedModel):
             init.copy_(module.inv_freq, inv_freq)
 
 
+class VoxtralStreamingEmbedder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.conv1 = VoxtralStreamingCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3)
+        self.conv2 = VoxtralStreamingCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2)
+
+    def forward(self, input_features, padding_cache=None):
+        inputs_embeds = nn.functional.gelu(self.conv1(input_features, padding_cache))
+        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds, padding_cache))
+        inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        return inputs_embeds
+
+
+class Conv1dCacheLayer:
+    def __init__(self, conv_config):
+        self.in_channels = conv_config["in_channels"]
+        self.left_pad = (conv_config["kernel_size"] - 1) * conv_config["dilation"]
+        self.cache: torch.Tensor | None = None
+        self.is_initialized: bool = False
+
+    def update(self, hidden_states):
+        batch_size = hidden_states.shape[0]
+    
+        # fetch the current cache
+        if not self.is_initialized:
+            current_cache = torch.zeros(batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype)
+            self.is_initialized = True
+        else:
+            current_cache = self.cache
+
+        # get the padding states
+        if self.left_pad > 0:
+            shortfall = max(0, self.left_pad - hidden_states.shape[-1])
+            if shortfall > 0:
+                padding_states = torch.cat([current_cache[:, :, -shortfall:], hidden_states], dim=-1)
+            else:
+                padding_states = hidden_states[:, :, -self.left_pad:]
+        else:
+            padding_states = torch.empty(batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device)
+
+        # update the cache
+        self.cache = padding_states
+
+        return current_cache
+
+
+class VoxtralStreamingConv1dPaddingCache:
+    def __init__(self, config):
+        if not hasattr(config, "_conv_config"):
+            raise ValueError("TODO")
+
+        self.layers = [Conv1dCacheLayer(conv_config) for conv_config in config._conv_config]
+
+    def update(self, hidden_states, layer_idx):
+        padding_states = self.layers[layer_idx].update(hidden_states)
+        padded_hidden_states = torch.cat([padding_states, hidden_states], dim=-1)
+        return padded_hidden_states
+
+@dataclass
+class VoxtralStreamingEncoderOutput(BaseModelOutputWithPast):
+    padding_cache: VoxtralStreamingConv1dPaddingCache | None = None
+
+
 @auto_docstring(
     custom_intro="""
     The VoxtralStreaming encoder, which is a Whisper encoder.
@@ -417,85 +482,43 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        self.dropout = config.dropout
-        self.layerdrop = config.encoder_layerdrop
-
-        embed_dim = config.d_model
-        self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
-        self.conv1 = VoxtralStreamingCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3)
-        self.conv2 = VoxtralStreamingCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2)
+        self.embedder = VoxtralStreamingEmbedder(config)
         self.layers = nn.ModuleList(
             [VoxtralStreamingEncoderLayer(config, layer_idx) for layer_idx in range(config.encoder_layers)]
         )
-        self.layer_norm = VoxtralStreamingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # Ignore copy
-        self.avg_pooler = nn.AvgPool1d(2, stride=2)
-
+        self.norm = VoxtralStreamingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = VoxtralStreamingRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
-        self.rotary_emb = VoxtralStreamingRotaryEmbedding(config)
+
         # Initialize weights and apply final processing
         self.post_init()
-
-    def _freeze_parameters(self):
-        for param in self.parameters():
-            param.requires_grad = False
-        self._requires_grad = False
-
-    def get_input_embeddings(self) -> nn.Module:
-        return self.conv1
-
-    def set_input_embeddings(self, value: nn.Module):
-        self.conv1 = value
-
-    def get_audio_inputs_embeds(self, input_features: torch.FloatTensor) -> torch.FloatTensor:
-        input_features = input_features.to(dtype=self.conv1.weight.dtype, device=self.conv1.weight.device)
-        inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        return inputs_embeds
 
     @check_model_inputs
     def forward(
         self,
-        input_features,
-        audio_inputs_embeds=None,
-        past_key_values = None,
-        use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
+        input_features=None,
+        padding_cache=None,
         position_ids: torch.LongTensor | None = None,
+        past_key_values = None,
+        padding_mask: torch.Tensor | None = None,
+        inputs_embeds=None,
+        cache_position: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        use_padding_cache: bool | None = None,
         attention_mask=None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPooling:
-        r"""
-        Args:
-            input_features (`torch.LongTensor` of shape `(batch_size, feature_size, sequence_length)`):
-                Float values of mel features extracted from the raw speech waveform. Raw speech waveform can be
-                obtained by loading a `.flac` or `.wav` audio file into an array of type `list[float]` or a
-                `numpy.ndarray`, *e.g.* via the soundfile library (`pip install soundfile`). To prepare the array into
-                `input_features`, the [`AutoFeatureExtractor`] should be used for extracting the mel features, padding
-                and conversion into a tensor of type `torch.FloatTensor`. See [`~WhisperFeatureExtractor.__call__`]
-            attention_mask (`torch.Tensor`)`, *optional*):
-                VoxtralStreaming does not support masking of the `input_features`, this argument is preserved for compatibility,
-                but it is not used. By default the silence in the input log mel spectrogram are ignored.
-        """
-        # expected_seq_length = self.config.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
-        # if input_features.shape[-1] != expected_seq_length:
-        #     raise ValueError(
-        #         f"Voxtral expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
-        #     )
+        if (input_features is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_features or inputs_embeds")
 
-        if audio_inputs_embeds is None:
-            input_features = input_features.to(dtype=self.conv1.weight.dtype, device=self.conv1.weight.device)
-            inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-            inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-            inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        else:
-            inputs_embeds = audio_inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.embedder(input_features, padding_cache)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
+
+        if use_padding_cache and padding_cache is None:
+            padding_cache = VoxtralStreamingConv1dPaddingCache(config=self.config)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -506,8 +529,7 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        mask_function = create_causal_mask if self.config.sliding_window is None else create_sliding_window_causal_mask
-        causal_mask = mask_function(
+        causal_mask = create_causal_mask(
             config=self.config,
             input_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -515,11 +537,10 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
             past_key_values=past_key_values,
             position_ids=position_ids,
         )
-        
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
 
-        for idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
@@ -531,10 +552,11 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
                 **kwargs,
             )
 
-        hidden_states = self.layer_norm(hidden_states)
-        return BaseModelOutputWithPast(
+        hidden_states = self.norm(hidden_states)
+        return VoxtralStreamingEncoderOutput(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
+            padding_cache=padding_cache,
         )
 
     # Ignore copy
@@ -561,7 +583,7 @@ class VoxtralStreamingMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class TimeEmbedding(torch.nn.Module):
+class TimeEmbedding(nn.Module):
     """Sinusoidal Embedding for encoding time"""
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
@@ -590,8 +612,6 @@ class TimeEmbedding(torch.nn.Module):
     """
 )
 class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, GenerationMixin):
-    _keep_in_fp32_modules_strict = ["embed_positions"]
-
     def __init__(self, config):
         super().__init__(config)
         self.vocab_size = config.text_config.vocab_size
@@ -627,8 +647,9 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
     )
     def get_audio_features(
         self,
-        input_features: torch.FloatTensor,
-        audio_inputs_embeds: torch.FloatTensor | None = None,
+        input_features: torch.FloatTensor = None,
+        padding_cache: torch.FloatTensor | None = None,
+        encoder_inputs_embeds: torch.FloatTensor | None = None,
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs]
     ) -> tuple | BaseModelOutputWithPooling:
@@ -641,9 +662,10 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             and conversion into a tensor of type `torch.FloatTensor`. See [`~WhisperFeatureExtractor.__call__`]
         """
         audio_outputs = self.audio_tower(
-            input_features,
-            audio_inputs_embeds,
+            input_features=input_features,
+            inputs_embeds=encoder_inputs_embeds,
             past_key_values=past_key_values,
+            padding_cache=padding_cache,
             return_dict=True,
             use_cache=True,
             **kwargs,
@@ -664,9 +686,9 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
-        audio_past_key_values: Cache | None = None,
+        encoder_past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        audio_inputs_embeds: torch.FloatTensor | None = None,
+        encoder_inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         cache_position: torch.LongTensor | None = None,
@@ -709,11 +731,11 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
-        if input_features is not None or audio_inputs_embeds is not None:
+        if input_features is not None or encoder_inputs_embeds is not None:
             audio_outputs = self.get_audio_features(
-                input_features,
-                audio_inputs_embeds,
-                past_key_values=audio_past_key_values,
+                input_features=input_features,
+                encoder_inputs_embeds=encoder_inputs_embeds,
+                past_key_values=encoder_past_key_values,
                 return_dict=True,
             )
             inputs_embeds += audio_outputs.pooler_output
@@ -738,7 +760,8 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             t_cond=t_cond,
             **kwargs,
         )
-        outputs["audio_past_key_values"] = audio_outputs.past_key_values
+        outputs["encoder_past_key_values"] = audio_outputs.past_key_values
+        outputs["padding_cache"] = audio_outputs.padding_cache
         return outputs
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
@@ -753,12 +776,13 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             # input_features should only be passed when we are not in cached decoding stage
             model_inputs["input_features"] = input_features
             # model_inputs["input_features"] = model_inputs["input_features"][..., start_idx:end_idx]
-            self.audio_inputs_embeds = self.audio_tower.get_audio_inputs_embeds(input_features)
+            self.encoder_inputs_embeds = self.audio_tower.embedder(input_features)
 
         start_idx = model_inputs["cache_position"][0] * 4
         end_idx = (model_inputs["cache_position"][-1] + 1) * 4
 
-        model_inputs["audio_inputs_embeds"] = self.audio_inputs_embeds[:, start_idx:end_idx, :]
+        model_inputs["encoder_inputs_embeds"] = self.encoder_inputs_embeds[:, start_idx:end_idx, :]
+        model_inputs.pop("input_features", None)
 
         return model_inputs
 
@@ -773,8 +797,8 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             outputs, model_kwargs, is_encoder_decoder, num_new_tokens
         )
 
-        if hasattr(outputs, "audio_past_key_values"):
-            model_kwargs["audio_past_key_values"] = outputs.audio_past_key_values
+        if hasattr(outputs, "encoder_past_key_values"):
+            model_kwargs["encoder_past_key_values"] = outputs.encoder_past_key_values
 
         return model_kwargs
 
