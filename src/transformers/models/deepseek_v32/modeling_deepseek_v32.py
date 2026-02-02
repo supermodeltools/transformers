@@ -253,7 +253,7 @@ def apply_interleave_rotary_emb(
 def index_no_scaling(q: torch.Tensor, _scale, k: torch.Tensor) -> torch.Tensor:
     logits = torch.matmul(q, k.transpose(-1, -2))  # [B, H, M, N]
     logits = torch.relu(logits)
-    logits = logits * _scale
+    logits = logits * _scale.unsqueeze(-1)
     index_score = logits.sum(dim=-1)               # [B, H, M]
     return index_score
 
@@ -309,6 +309,7 @@ class DeepseekV32Indexer(nn.Module):
 
         k, _ = past_key_values.update(k, k, layer_idx=self.layer_idx, cache_kwargs={"cache_position": cache_positions})
 
+        # weights_proj is kept in fp32
         weights = self.weights_proj(hidden_states.float()) * self.num_heads ** -0.5
         weights = weights * self.softmax_scale
 
@@ -460,20 +461,19 @@ class DeepseekV32Moe(nn.Module):
         batch_size, seq_len, hidden_dim = router_logits.shape
         router_logits = router_logits.view(-1, hidden_dim)
         router_logits = router_logits.softmax(dim=-1, dtype=torch.float32)
-        if self.topk_method == "greedy":
-            topk_weight, topk_idx = torch.topk(router_logits, k=self.top_k, dim=-1, sorted=False)
-        elif self.topk_method == "group_limited_greedy":
-            group_scores = router_logits.view(batch_size * seq_len, self.num_group, -1).max(dim=-1).values
-            group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
-            group_mask = torch.zeros_like(group_scores)
-            group_mask.scatter_(1, group_idx, 1)
-            score_mask = (
-                group_mask.unsqueeze(-1)
-                .expand(batch_size * seq_len, self.num_group, self.num_experts // self.num_group)
-                .reshape(batch_size * seq_len, -1)
-            )
-            tmp_scores = router_logits.masked_fill(~score_mask.bool(), 0.0)
-            topk_weight, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
+        group_scores = router_logits.view(batch_size * seq_len, self.num_group, -1).max(dim=-1).values
+        
+        # Group limited expert routing.
+        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(batch_size * seq_len, self.num_group, self.num_experts // self.num_group)
+            .reshape(batch_size * seq_len, -1)
+        )
+        tmp_scores = router_logits.masked_fill(~score_mask.bool(), 0.0)
+        topk_weight, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
 
         topk_weight = topk_weight * self.routed_scaling_factor
         return topk_idx, topk_weight
@@ -553,6 +553,7 @@ class DeepseekV32PreTrainedModel(PreTrainedModel):
         "hidden_states": DeepseekV32DecoderLayer,
         "attentions": DeepseekV32Attention,
     }
+    _keep_in_fp32_modules = ["indexer.weights_proj", "mlp.gate"]
 
     @torch.no_grad()
     def _init_weights(self, module):
