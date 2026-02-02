@@ -112,7 +112,7 @@ class VoxtralStreamingEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin
         self.mlp_bias = True
         self.hidden_act = "silu"
         self.head_dim = 64
-    
+
         # TODO: @eustlb, we do not use dropout and layerdrop, yet we need to hardcode them
         # to be able to use Whisper with modular (here actually from Qwen2-Audio and copied from).
         # After a future Whisper refactor, we should remove this.
@@ -158,7 +158,7 @@ class VoxtralStreamingConfig(PreTrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-    
+
     model_type = "voxtral_streaming"
     sub_configs = {"text_config": AutoConfig, "audio_config": AutoConfig}
 

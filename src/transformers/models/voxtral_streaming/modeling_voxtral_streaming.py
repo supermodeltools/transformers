@@ -17,10 +17,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import math
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -28,11 +27,10 @@ import torch.nn as nn
 
 from ... import initialization as init
 from ...activations import ACT2FN
-from ...cache_utils import Cache
+from ...cache_utils import Cache, DynamicCache
 from ...generation import GenerationMixin
 from ...integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub, use_kernelized_func
-from ...masking_utils import create_causal_mask 
-from ...cache_utils import Cache, DynamicCache
+from ...masking_utils import create_causal_mask
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
@@ -42,6 +40,62 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.generic import check_model_inputs, maybe_autocast
 from ..auto import AutoModel, AutoModelForCausalLM
 from .configuration_voxtral_streaming import VoxtralStreamingConfig, VoxtralStreamingEncoderConfig
+
+
+class Conv1dCacheLayer:
+    def __init__(self, conv_config):
+        self.in_channels = conv_config["in_channels"]
+        self.left_pad = (conv_config["kernel_size"] - 1) * conv_config["dilation"] + 1 - conv_config["stride"]
+        self.cache: torch.Tensor | None = None
+        self.is_initialized: bool = False
+
+    def update(self, hidden_states):
+        batch_size = hidden_states.shape[0]
+
+        if not self.is_initialized:
+            self.cache = torch.zeros(
+                batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            self.output_cache = torch.zeros_like(self.cache)
+            self.is_initialized = True
+
+        # double buffer to keep tensors static for compile
+        self.output_cache, self.cache = self.cache, self.output_cache
+
+        # get the padding states
+        if self.left_pad > 0:
+            shortfall = max(0, self.left_pad - hidden_states.shape[-1])
+            if shortfall > 0:
+                padding_states = torch.cat([self.output_cache[:, :, -shortfall:], hidden_states], dim=-1)
+            else:
+                padding_states = hidden_states[:, :, -self.left_pad :]
+        else:
+            padding_states = torch.empty(
+                batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
+            )
+
+        # update the cache
+        self.cache.copy_(padding_states)
+
+        return self.output_cache
+
+
+class VoxtralStreamingConv1dPaddingCache:
+    def __init__(self, config):
+        if not hasattr(config, "_conv_config"):
+            raise ValueError("TODO")
+
+        self.layers = [Conv1dCacheLayer(conv_config) for conv_config in config._conv_config]
+
+    def update(self, hidden_states, layer_idx):
+        padding_states = self.layers[layer_idx].update(hidden_states)
+        padded_hidden_states = torch.cat([padding_states, hidden_states], dim=-1)
+        return padded_hidden_states
+
+
+@dataclass
+class VoxtralStreamingEncoderOutput(BaseModelOutputWithPast):
+    padding_cache: VoxtralStreamingConv1dPaddingCache | None = None
 
 
 class VoxtralStreamingRotaryEmbedding(nn.Module):
@@ -118,14 +172,20 @@ class VoxtralStreamingCausalConv1d(nn.Conv1d):
         stride: int = 1,
         dilation: int = 1,
         bias: bool = True,
+        conv_layer_idx: int | None = 0,
     ):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, dilation=dilation, bias=bias)
         self._stride = self.stride[0]
         self._effective_kernel_size = (kernel_size - 1) * self.dilation[0] + 1
         self._padding_total = self._effective_kernel_size - self._stride
+        self.conv_layer_idx = conv_layer_idx
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        x = nn.functional.pad(x, (self._padding_total, 0))
+    def forward(
+        self, x: torch.Tensor, padding_cache: torch.Tensor | None = None, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if padding_cache is not None:
+            x = padding_cache.update(x, self.conv_layer_idx)
+
         x = super().forward(x)
 
         if mask is not None:
@@ -258,7 +318,7 @@ class VoxtralStreamingAttention(nn.Module):
         past_key_values: Cache | None = None,
         cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -308,6 +368,22 @@ class VoxtralStreamingMLP(nn.Module):
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
+
+
+class VoxtralStreamingEmbedder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.conv1 = VoxtralStreamingCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3, conv_layer_idx=0)
+        self.conv2 = VoxtralStreamingCausalConv1d(
+            config.d_model, config.d_model, kernel_size=3, stride=2, conv_layer_idx=1
+        )
+
+    def forward(self, input_features, padding_cache=None):
+        inputs_embeds = nn.functional.gelu(self.conv1(input_features, padding_cache=padding_cache))
+        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds, padding_cache=padding_cache))
+        inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        return inputs_embeds
 
 
 class VoxtralStreamingEncoderLayer(GradientCheckpointingLayer):
@@ -384,76 +460,8 @@ class VoxtralStreamingPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, TimeEmbedding):
-            inv_freq = torch.exp(
-                -math.log(module.theta)
-                * torch.arange(module.dim // 2).float()
-                / (module.dim // 2)
-            )
+            inv_freq = torch.exp(-math.log(module.theta) * torch.arange(module.dim // 2).float() / (module.dim // 2))
             init.copy_(module.inv_freq, inv_freq)
-
-
-class VoxtralStreamingEmbedder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.conv1 = VoxtralStreamingCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3)
-        self.conv2 = VoxtralStreamingCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2)
-
-    def forward(self, input_features, padding_cache=None):
-        inputs_embeds = nn.functional.gelu(self.conv1(input_features, padding_cache))
-        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds, padding_cache))
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        return inputs_embeds
-
-
-class Conv1dCacheLayer:
-    def __init__(self, conv_config):
-        self.in_channels = conv_config["in_channels"]
-        self.left_pad = (conv_config["kernel_size"] - 1) * conv_config["dilation"]
-        self.cache: torch.Tensor | None = None
-        self.is_initialized: bool = False
-
-    def update(self, hidden_states):
-        batch_size = hidden_states.shape[0]
-    
-        # fetch the current cache
-        if not self.is_initialized:
-            current_cache = torch.zeros(batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype)
-            self.is_initialized = True
-        else:
-            current_cache = self.cache
-
-        # get the padding states
-        if self.left_pad > 0:
-            shortfall = max(0, self.left_pad - hidden_states.shape[-1])
-            if shortfall > 0:
-                padding_states = torch.cat([current_cache[:, :, -shortfall:], hidden_states], dim=-1)
-            else:
-                padding_states = hidden_states[:, :, -self.left_pad:]
-        else:
-            padding_states = torch.empty(batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device)
-
-        # update the cache
-        self.cache = padding_states
-
-        return current_cache
-
-
-class VoxtralStreamingConv1dPaddingCache:
-    def __init__(self, config):
-        if not hasattr(config, "_conv_config"):
-            raise ValueError("TODO")
-
-        self.layers = [Conv1dCacheLayer(conv_config) for conv_config in config._conv_config]
-
-    def update(self, hidden_states, layer_idx):
-        padding_states = self.layers[layer_idx].update(hidden_states)
-        padded_hidden_states = torch.cat([padding_states, hidden_states], dim=-1)
-        return padded_hidden_states
-
-@dataclass
-class VoxtralStreamingEncoderOutput(BaseModelOutputWithPast):
-    padding_cache: VoxtralStreamingConv1dPaddingCache | None = None
 
 
 @auto_docstring(
@@ -499,7 +507,7 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
         input_features=None,
         padding_cache=None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values = None,
+        past_key_values=None,
         padding_mask: torch.Tensor | None = None,
         inputs_embeds=None,
         cache_position: torch.LongTensor | None = None,
@@ -511,14 +519,14 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
         if (input_features is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_features or inputs_embeds")
 
+        if use_padding_cache and padding_cache is None:
+            padding_cache = VoxtralStreamingConv1dPaddingCache(config=self.config)
+
         if inputs_embeds is None:
             inputs_embeds = self.embedder(input_features, padding_cache)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
-
-        if use_padding_cache and padding_cache is None:
-            padding_cache = VoxtralStreamingConv1dPaddingCache(config=self.config)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -559,14 +567,45 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
             padding_cache=padding_cache,
         )
 
-    # Ignore copy
-    def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor):
-        """
-        Computes the output length of the convolutional layers and the output length of the audio encoder
-        """
-        input_lengths = (input_lengths - 1) // 2 + 1
-        output_lengths = (input_lengths - 2) // 2 + 1
-        return input_lengths, output_lengths
+
+# class MistralStreamingAdaRmsNorm(nn.Module):
+#     def __init__(self, config: MistralConfig):
+#         super().__init__()
+#         # TODO: how to add the intermediate size to the config? since it already the mistral one? new model? new config only?
+#         self.linear1 = nn.Linear(config.hidden_size, 32, bias=False)
+#         self.linear2 = nn.Linear(32, config.hidden_size, bias=False)
+
+#     def forward(self, hidden_states):
+#         hidden_states = self.linear1(hidden_states)
+#         hidden_states = nn.functional.gelu(hidden_states)
+#         hidden_states = self.linear2(hidden_states)
+#         return hidden_states
+
+
+# class MistralStreamingDecoderLayer(MistralDecoderLayer):
+#     def __init__(self, config: MistralConfig, layer_idx: int):
+#         super().__init__(config, layer_idx)
+#         self.ada_rms_norm = MistralStreamingAdaRmsNorm(config)
+
+
+# class MistralStreamingForCausalLM(MistralForCausalLM): ...
+
+
+class TimeEmbedding(nn.Module):
+    """Sinusoidal Embedding for encoding time"""
+
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+        inv_freq = torch.exp(-math.log(self.theta) * torch.arange(self.dim // 2).float() / (self.dim // 2))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
+        inv_freq = self.inv_freq.to(device=t.device, dtype=t.dtype)
+        emb = t * inv_freq  # (B, 1) x (D/2,) -> (B, D/2) or (B, T, 1) x (D/2,) -> (B, T, D/2)
+        return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
 
 
 class VoxtralStreamingMultiModalProjector(nn.Module):
@@ -583,35 +622,14 @@ class VoxtralStreamingMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class TimeEmbedding(nn.Module):
-    """Sinusoidal Embedding for encoding time"""
-
-    def __init__(self, dim: int, theta: float = 10000.0) -> None:
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-        inv_freq = torch.exp(
-            -math.log(self.theta)
-            * torch.arange(self.dim // 2).float()
-            / (self.dim // 2)
-        )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
-        inv_freq = self.inv_freq.to(device=t.device, dtype=t.dtype)
-        emb = (
-            t * inv_freq
-        )  # (B, 1) x (D/2,) -> (B, D/2) or (B, T, 1) x (D/2,) -> (B, T, D/2)
-        return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
-
-
 @auto_docstring(
     custom_intro="""
     The VoxtralStreaming model, which consists of Whisper encoder, a multi-modal projector and a LLama language model.
     """
 )
 class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, GenerationMixin):
+    _keep_in_fp32_modules_strict = ["embed_positions"]
+
     def __init__(self, config):
         super().__init__(config)
         self.vocab_size = config.text_config.vocab_size
@@ -651,7 +669,7 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         padding_cache: torch.FloatTensor | None = None,
         encoder_inputs_embeds: torch.FloatTensor | None = None,
         past_key_values: Cache | None = None,
-        **kwargs: Unpack[TransformersKwargs]
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPooling:
         r"""
         input_features (`torch.FloatTensor`):
@@ -668,6 +686,7 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             padding_cache=padding_cache,
             return_dict=True,
             use_cache=True,
+            use_padding_cache=True,
             **kwargs,
         )
         audio_hidden_states = audio_outputs.last_hidden_state
@@ -687,6 +706,7 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         encoder_past_key_values: Cache | None = None,
+        padding_cache: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         encoder_inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
@@ -736,6 +756,7 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
                 input_features=input_features,
                 encoder_inputs_embeds=encoder_inputs_embeds,
                 past_key_values=encoder_past_key_values,
+                padding_cache=padding_cache,
                 return_dict=True,
             )
             inputs_embeds += audio_outputs.pooler_output
@@ -768,21 +789,25 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         # Overwritten -- we should not pass input_features when we are in cached decoding stage
 
         input_features = kwargs.pop("input_features", None)
-        is_first_iteration = kwargs.get("is_first_iteration", False)
+        # is_first_iteration = kwargs.get("is_first_iteration", False)
 
         model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
 
-        if is_first_iteration or not kwargs.get("use_cache", True):
-            # input_features should only be passed when we are not in cached decoding stage
-            model_inputs["input_features"] = input_features
-            # model_inputs["input_features"] = model_inputs["input_features"][..., start_idx:end_idx]
-            self.encoder_inputs_embeds = self.audio_tower.embedder(input_features)
+        # if is_first_iteration or not kwargs.get("use_cache", True):
+        #     # input_features should only be passed when we are not in cached decoding stage
+        #     model_inputs["input_features"] = input_features
+        #     # model_inputs["input_features"] = model_inputs["input_features"][..., start_idx:end_idx]
+        #     self.encoder_inputs_embeds = self.audio_tower.embedder(input_features)
 
         start_idx = model_inputs["cache_position"][0] * 4
         end_idx = (model_inputs["cache_position"][-1] + 1) * 4
 
-        model_inputs["encoder_inputs_embeds"] = self.encoder_inputs_embeds[:, start_idx:end_idx, :]
-        model_inputs.pop("input_features", None)
+        # model_inputs["encoder_inputs_embeds"] = self.encoder_inputs_embeds[:, start_idx:end_idx, :]
+        # model_inputs.pop("input_features", None)
+
+        start_idx *= 2
+        end_idx *= 2
+        model_inputs["input_features"] = input_features[..., start_idx:end_idx]
 
         return model_inputs
 
@@ -799,6 +824,9 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
 
         if hasattr(outputs, "encoder_past_key_values"):
             model_kwargs["encoder_past_key_values"] = outputs.encoder_past_key_values
+
+        if hasattr(outputs, "padding_cache"):
+            model_kwargs["padding_cache"] = outputs.padding_cache
 
         return model_kwargs
 
