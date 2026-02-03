@@ -625,7 +625,7 @@ class ChineseCLIPTextEncoder(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.FloatTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> BaseModelOutput:
+    ) -> tuple[torch.Tensor] | BaseModelOutput:
         for i, layer_module in enumerate(self.layer):
             layer_outputs = layer_module(
                 hidden_states,
