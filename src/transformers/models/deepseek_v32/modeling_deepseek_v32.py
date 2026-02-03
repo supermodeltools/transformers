@@ -252,12 +252,16 @@ def apply_interleave_rotary_emb(
     return y
 
 def index_no_scaling(q: torch.Tensor, _scale, k: torch.Tensor) -> torch.Tensor:
+    # q is b, s, n_heads, head_dim
+    # k is b, s, head_dim
+    # _scale is b, s, head_dim 
+    # the output should be B, S, X :)
+    # then we TOP_K on the output but the given index should be in S.
     # Non quantized version goes extremely wrong :)
     logits = q @ k[..., None]
     logits = torch.relu(logits)
-    logits = logits.squeeze(-1) * _scale
-    index_score = logits.sum(dim=-1)               # [B, H, M]
-    return index_score
+    logits = (logits * _scale.unsqueeze(-2)).sum(-1)           # [B, H, M]
+    return logits # shape is just B, Seqlen. It just gives a score and then we are only using the ones that fall in the top 2048 if ctx len > 2048. If not they are all always used, should be skipped :) :)
 
 
 
@@ -323,7 +327,7 @@ class DeepseekV32Indexer(nn.Module):
         index_score = index_no_scaling(q, weights, k)
         # TODO use our interface for this ? what mask is this one actually? seq_len, num_heads is trhe shape of the scores
         if attention_mask is not None:
-            index_score += attention_mask[:,0,:, :1]
+            index_score += attention_mask[:,0,:, 0]
         topk_indices = index_score.topk(min(self.index_topk, cache_positions[-1] + 1), dim=-1)[1]
         return topk_indices
 
