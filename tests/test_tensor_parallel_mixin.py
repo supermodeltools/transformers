@@ -44,7 +44,7 @@
 
     PATH B: Conversion + Load (MoE models like Mixtral, Qwen2-MoE)
     --------------------------------------------------------------
-    but EXCEPTION for GPT_OSS as weight by default 3D 
+    but EXCEPTION for GPT_OSS as weight by default 3D
 
     Checkpoint format != Model format (conversion mapping required)
 
@@ -65,7 +65,7 @@
              ▼
         TP-Sharded Model (fused experts)
 
-    Tests: test_tp_generation_with_conversion, test_tp_conversion_integration
+    Tests: test_tp_generation_with_conversion
 """
 
 import os
@@ -118,78 +118,6 @@ def get_packed_grad_shard(grad, world_size, rank, dim):
 
     # Select along the sharded dimension
     return grad.index_select(dim, torch.tensor(indices, device=grad.device))
-
-
-def _create_original_format_checkpoint(model, tmp_dir, model_type):
-    """Create a checkpoint in original (unfused) format to trigger conversion mapping.
-
-    This unfuses the internal gate_up_proj format back to the original checkpoint format
-    that the model was originally trained with (e.g., separate w1/w3/w2 for Mixtral,
-    or separate gate_proj/up_proj/down_proj for Qwen2Moe).
-    """
-    from safetensors.torch import save_file
-
-    # Determine conversion pattern
-    conversion_pattern = _MODEL_TO_CONVERSION_PATTERN.get(model_type)
-
-    state_dict = model.state_dict()
-    original_state_dict = {}
-
-    for key, tensor in state_dict.items():
-        if conversion_pattern == "mixtral":
-            # Mixtral-style: .mlp.experts.X → .block_sparse_moe.experts.N.wX
-            if ".mlp.experts.gate_up_proj" in key:
-                # Unfuse gate_up_proj: [num_experts, 2*intermediate, hidden]
-                num_experts = tensor.shape[0]
-                intermediate_dim = tensor.shape[1] // 2
-                gate, up = tensor.split(intermediate_dim, dim=1)
-
-                base_key = key.replace(".mlp.experts.gate_up_proj", ".block_sparse_moe")
-                for expert_idx in range(num_experts):
-                    original_state_dict[f"{base_key}.experts.{expert_idx}.w1.weight"] = gate[expert_idx]
-                    original_state_dict[f"{base_key}.experts.{expert_idx}.w3.weight"] = up[expert_idx]
-            elif ".mlp.experts.down_proj" in key:
-                # Unfuse down_proj: [num_experts, hidden, intermediate]
-                num_experts = tensor.shape[0]
-                base_key = key.replace(".mlp.experts.down_proj", ".block_sparse_moe")
-                for expert_idx in range(num_experts):
-                    original_state_dict[f"{base_key}.experts.{expert_idx}.w2.weight"] = tensor[expert_idx]
-            elif ".mlp.router" in key:
-                # Rename router: .mlp.router → .block_sparse_moe.gate
-                new_key = key.replace(".mlp.router", ".block_sparse_moe.gate")
-                original_state_dict[new_key] = tensor
-            else:
-                original_state_dict[key] = tensor
-
-        elif conversion_pattern == "qwen2_moe":
-            # Qwen2-style: .mlp.experts.X → .mlp.experts.N.X_proj
-            if ".mlp.experts.gate_up_proj" in key:
-                # Unfuse gate_up_proj: [num_experts, 2*intermediate, hidden]
-                num_experts = tensor.shape[0]
-                intermediate_dim = tensor.shape[1] // 2
-                gate, up = tensor.split(intermediate_dim, dim=1)
-
-                base_key = key.replace(".mlp.experts.gate_up_proj", ".mlp.experts")
-                for expert_idx in range(num_experts):
-                    original_state_dict[f"{base_key}.{expert_idx}.gate_proj.weight"] = gate[expert_idx]
-                    original_state_dict[f"{base_key}.{expert_idx}.up_proj.weight"] = up[expert_idx]
-            elif ".mlp.experts.down_proj" in key:
-                # Unfuse down_proj: [num_experts, hidden, intermediate]
-                num_experts = tensor.shape[0]
-                base_key = key.replace(".mlp.experts.down_proj", ".mlp.experts")
-                for expert_idx in range(num_experts):
-                    original_state_dict[f"{base_key}.{expert_idx}.down_proj.weight"] = tensor[expert_idx]
-            else:
-                original_state_dict[key] = tensor
-        else:
-            # No conversion pattern - keep as-is
-            original_state_dict[key] = tensor
-
-    # Save checkpoint in safetensors format
-    save_file(original_state_dict, os.path.join(tmp_dir, "model.safetensors"))
-
-    # Save config
-    model.config.save_pretrained(tmp_dir)
 
 
 def _global_wrapper(rank, func, tp, port, func_args, func_kwargs):
@@ -455,15 +383,25 @@ class TensorParallelTesterMixin(ABC):
         model_tp.eval()
         model.eval()
 
-        # Verify conversion mapping was applied
+        # Verification 1: Conversion mapping was applied
         assert hasattr(model_tp, "_weight_conversions"), "Conversion mapping was not applied during load"
         assert model_tp._weight_conversions is not None, "Conversion mapping is None"
-        _debug_log(_rank, f"Conversion mapping applied: {len(model_tp._weight_conversions)} conversions")
 
-        # Verify TP sharding by comparing parameter shapes
-        self._verify_tp_sharding(_rank, model_tp, model)
+        from transformers.core_model_loading import WeightConverter
 
-        # Test generation
+        converters = [c for c in model_tp._weight_conversions if isinstance(c, WeightConverter)]
+        assert len(converters) > 0, "No WeightConverter operations were applied"
+        _debug_log(_rank, f"Applied {len(converters)} WeightConverter operations")
+        if _rank == 0:
+            for c in converters:
+                print(f"  - {c.source_patterns} -> {c.target_patterns}")
+
+        # Verification 2: TP sharding occurred
+        sharded_params = self._verify_tp_sharding(_rank, model_tp, model)
+        assert len(sharded_params) > 0, "No parameters were sharded by TP"
+        _debug_log(_rank, f"{len(sharded_params)} parameters sharded")
+
+        # Verification 3: Test generation
         set_seed(42)
         input_ids = torch.randint(0, model.config.vocab_size, (1, 10)).to(device)
         generation_kwargs = {
@@ -489,46 +427,6 @@ class TensorParallelTesterMixin(ABC):
         )
 
         _debug_log(_rank, "Generation with conversion mapping PASSED")
-        dist.barrier()
-
-    def _test_tp_conversion_integration_impl(self, rank, model_path, model_class):
-        """Verify that conversion mapping + TP sharding both execute during load."""
-        model_tp, model, device = self._load_tp_and_reference_models(model_path, model_class)
-
-        # Verification 1: Conversion mapping was applied
-        assert hasattr(model_tp, "_weight_conversions"), "Conversion mapping not applied"
-        assert model_tp._weight_conversions is not None, "Conversion mapping is None"
-
-        from transformers.core_model_loading import WeightConverter
-
-        converters = [c for c in model_tp._weight_conversions if isinstance(c, WeightConverter)]
-        assert len(converters) > 0, "No WeightConverter operations were applied"
-        _debug_log(rank, f"Applied {len(converters)} WeightConverter operations")
-        if rank == 0:
-            for c in converters:
-                print(f"  - {c.source_patterns} -> {c.target_patterns}")
-
-        # Verification 2: TP sharding occurred
-        sharded_params = self._verify_tp_sharding(rank, model_tp, model)
-        assert len(sharded_params) > 0, "No parameters were sharded by TP"
-        _debug_log(rank, f"{len(sharded_params)} parameters sharded:")
-        if rank == 0:
-            for name in sharded_params[:5]:
-                print(f"  - {name}")
-
-        # Verification 3: Forward pass works
-        set_seed(42)
-        input_ids = torch.randint(0, model_tp.config.vocab_size, (2, 32)).to(device)
-
-        with torch.no_grad():
-            output_tp = model_tp(input_ids)
-            output_full = model(input_ids)
-
-        assert torch.allclose(output_tp.logits, output_full.logits, atol=1e-4, rtol=1e-4), (
-            "TP and non-TP outputs differ after conversion+sharding"
-        )
-
-        _debug_log(rank, "Forward pass verification PASSED")
         dist.barrier()
 
     # ============================================================
@@ -617,7 +515,8 @@ class TensorParallelTesterMixin(ABC):
         """
         self._skip_if_not_supported()
 
-        # Only run for models with conversion mapping
+        # Only run for models with conversion mapping (e.g., MoE models like Mixtral, Qwen2-MoE)
+        # These models have checkpoint weights in unfused format that need conversion during loading
         config = self.model_tester.get_config()
         model_type = getattr(config, "model_type", None)
         if model_type not in _MODEL_TO_CONVERSION_PATTERN:
@@ -629,38 +528,24 @@ class TensorParallelTesterMixin(ABC):
         max_new_tokens = 10
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # Create model and save in original (unfused) format
-            model = model_class(config)
-            _create_original_format_checkpoint(model, tmp_dir, model_type)
+            # Create model and save in original (unfused) format using native reversal logic
+            # This simulates loading from an original checkpoint (e.g., from HuggingFace Hub)
+            from safetensors.torch import save_file
 
+            from transformers.core_model_loading import revert_weight_conversion
+
+            # Step 1: Create model with fused weights (internal representation)
+            model = model_class(config)
+            # Step 2: Get the current state dict (fused format)
+            state_dict = model.state_dict()
+            # Step 3: Revert to unfused format (simulates original checkpoint format, e.g., w1/w3/w2 separate)
+            original_state_dict = revert_weight_conversion(model, state_dict)
+            # Step 4: Save checkpoint files in the original unfused format
+            save_file(original_state_dict, os.path.join(tmp_dir, "model.safetensors"))
+            model.config.save_pretrained(tmp_dir)
+
+            # Execute the distributed test: loads the unfused checkpoint with tp_plan="auto"
+            # and verifies that conversion mapping is correctly applied during TP loading
             _init_distributed(tp=self.tensor_parallel_size)(self._test_tp_generation_with_conversion_impl)(
                 tmp_dir, model_class, atol, rtol, max_new_tokens
-            )
-
-    def test_tp_conversion_integration(self):
-        """Test that conversion mapping + TP sharding integrate correctly during load.
-
-        Loading path: original checkpoint → conversion mapping → TP sharding → model
-        Applies to: MoE models (Mixtral, Qwen2-MoE, etc.) where checkpoint has unfused experts
-
-        This test verifies that:
-        1. WeightConverter operations are applied (conversion mapping)
-        2. Parameters are sharded correctly (TP sharding)
-        3. Forward pass produces correct outputs
-        """
-        self._skip_if_not_supported()
-
-        config = self.model_tester.get_config()
-        model_type = getattr(config, "model_type", None)
-        if model_type not in _MODEL_TO_CONVERSION_PATTERN:
-            self.skipTest(f"Model type {model_type} has no conversion mapping")
-
-        model_class = self._get_tp_model_class()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            model = model_class(config)
-            _create_original_format_checkpoint(model, tmp_dir, model_type)
-
-            _init_distributed(tp=self.tensor_parallel_size)(self._test_tp_conversion_integration_impl)(
-                tmp_dir, model_class
             )

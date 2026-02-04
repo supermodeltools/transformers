@@ -220,7 +220,7 @@ run_test() {
     
     # Run only tensor parallel tests using assigned GPU pair
     CUDA_VISIBLE_DEVICES=$gpu_list \
-        python -m pytest -v -rs "$test_file" -k "test_tensor_parallel" \
+        python -m pytest -v -rs "$test_file" -k "test_tp_" \
         > "$RESULTS_DIR/${model_name}.log" 2>&1
     
     local exit_code=$?
