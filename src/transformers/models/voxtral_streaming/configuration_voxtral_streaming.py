@@ -112,6 +112,7 @@ class VoxtralStreamingEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin
         self.mlp_bias = True
         self.hidden_act = "silu"
         self.head_dim = 64
+        self.sliding_window = 750
 
         # TODO: @eustlb, we do not use dropout and layerdrop, yet we need to hardcode them
         # to be able to use Whisper with modular (here actually from Qwen2-Audio and copied from).
@@ -175,6 +176,7 @@ class VoxtralStreamingConfig(PreTrainedConfig):
         "rope_theta": 100000000.0,
         "head_dim": 128,
         "tie_word_embeddings": True,
+        "sliding_window": 8192,
     }
 
     def __init__(

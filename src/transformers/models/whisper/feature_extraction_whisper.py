@@ -132,7 +132,7 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         log_spec_batch = np.array(log_spec_batch)
         return log_spec_batch
 
-    def _torch_extract_fbank_features(self, waveform: np.ndarray, device: str = "cpu") -> np.ndarray:
+    def _torch_extract_fbank_features(self, waveform: np.ndarray, device: str = "cpu", center: bool = True, iteration: int = 0) -> np.ndarray:
         """
         Compute the log-mel spectrogram of the audio using PyTorch's GPU-accelerated STFT implementation with batching,
         yielding results similar to cpu computing with 1e-5 tolerance.
@@ -146,7 +146,7 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         if self.dither != 0.0:
             waveform += self.dither * torch.randn(waveform.shape, dtype=waveform.dtype, device=waveform.device)
 
-        stft = torch.stft(waveform, self.n_fft, self.hop_length, window=window, return_complex=True)
+        stft = torch.stft(waveform, self.n_fft, self.hop_length, window=window, return_complex=True, center=center)
         magnitudes = stft[..., :-1].abs() ** 2
 
         mel_filters = torch.from_numpy(self.mel_filters).to(device, torch.float32)
@@ -157,11 +157,17 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
             max_val = log_spec.max(dim=2, keepdim=True)[0].max(dim=1, keepdim=True)[0]
             log_spec = torch.maximum(log_spec, max_val - 8.0)
         else:
-            log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+            # max_ = torch.tensor(max(log_spec.max().item(), 0))
+            max_ = log_spec.max()
+            max_ = torch.tensor(1.5)
+            # max_ = torch.load(f"/home/eustache_lebihan/add-voxstral-main/tmp/max_{iteration+1}.pt").cpu()
+
+            log_spec = torch.maximum(log_spec, max_ - 8.0)
+
         log_spec = (log_spec + 4.0) / 4.0
         if device != "cpu":
             log_spec = log_spec.detach().cpu()
-        return log_spec.numpy()
+        return log_spec
 
     @staticmethod
     # Copied from transformers.models.wav2vec2.feature_extraction_wav2vec2.Wav2Vec2FeatureExtractor.zero_mean_unit_var_norm

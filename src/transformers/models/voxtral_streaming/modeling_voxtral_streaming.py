@@ -27,10 +27,11 @@ import torch.nn as nn
 
 from ... import initialization as init
 from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache
+from ...cache_utils import Cache, DynamicCache, StaticCache
 from ...generation import GenerationMixin
 from ...integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub, use_kernelized_func
-from ...masking_utils import create_causal_mask
+from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
@@ -56,11 +57,7 @@ class Conv1dCacheLayer:
             self.cache = torch.zeros(
                 batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype
             )
-            self.output_cache = torch.zeros_like(self.cache)
             self.is_initialized = True
-
-        # double buffer to keep tensors static for compile
-        self.output_cache, self.cache = self.cache, self.output_cache
 
         # get the padding states
         if self.left_pad > 0:
@@ -68,16 +65,17 @@ class Conv1dCacheLayer:
             if shortfall > 0:
                 padding_states = torch.cat([self.output_cache[:, :, -shortfall:], hidden_states], dim=-1)
             else:
-                padding_states = hidden_states[:, :, -self.left_pad :]
+                padding_states = hidden_states[:, :, -self.left_pad :].clone()
         else:
             padding_states = torch.empty(
                 batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
             )
 
         # update the cache
-        self.cache.copy_(padding_states)
+        current_cache = self.cache.clone()
+        self.cache = padding_states
 
-        return self.output_cache
+        return current_cache
 
 
 class VoxtralStreamingConv1dPaddingCache:
@@ -181,23 +179,16 @@ class VoxtralStreamingCausalConv1d(nn.Conv1d):
         self.conv_layer_idx = conv_layer_idx
 
     def forward(
-        self, x: torch.Tensor, padding_cache: torch.Tensor | None = None, mask: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        padding_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if padding_cache is not None:
             x = padding_cache.update(x, self.conv_layer_idx)
+        else:
+            x = nn.functional.pad(x, (self._padding_total, 0))
 
-        x = super().forward(x)
-
-        if mask is not None:
-            mask = nn.functional.pad(mask, (self.left_pad, 0))[:, None, :]
-            weight = torch.ones(1, 1, self.kernel_size[0], device=mask.device)
-            mask = nn.functional.conv1d(mask.float(), weight, stride=self.stride)
-            mask = mask > 0
-            x *= mask
-
-        if mask is not None:
-            mask = mask.squeeze(1)
-        return x
+        return super().forward(x)
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -300,7 +291,7 @@ class VoxtralStreamingAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
@@ -313,12 +304,12 @@ class VoxtralStreamingAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attention_mask: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
         cache_position: torch.LongTensor | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -346,6 +337,7 @@ class VoxtralStreamingAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
+            sliding_window=getattr(self.config, "sliding_window", None),  # main diff with Llama
             **kwargs,
         )
 
@@ -537,7 +529,8 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = create_causal_mask(
+        mask_function = create_causal_mask if self.config.sliding_window is None else create_sliding_window_causal_mask
+        causal_mask = mask_function(
             config=self.config,
             input_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -785,31 +778,34 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
         outputs["padding_cache"] = audio_outputs.padding_cache
         return outputs
 
-    def prepare_inputs_for_generation(self, *args, **kwargs):
-        # Overwritten -- we should not pass input_features when we are in cached decoding stage
-
-        input_features = kwargs.pop("input_features", None)
-        # is_first_iteration = kwargs.get("is_first_iteration", False)
-
-        model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
-
-        # if is_first_iteration or not kwargs.get("use_cache", True):
-        #     # input_features should only be passed when we are not in cached decoding stage
-        #     model_inputs["input_features"] = input_features
-        #     # model_inputs["input_features"] = model_inputs["input_features"][..., start_idx:end_idx]
-        #     self.encoder_inputs_embeds = self.audio_tower.embedder(input_features)
+    def prepare_inputs_for_generation(
+        self,
+        *args,
+        is_first_iteration: bool = False,
+        encoder_inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        model_inputs = super().prepare_inputs_for_generation(*args, is_first_iteration=is_first_iteration, **kwargs)
 
         start_idx = model_inputs["cache_position"][0] * 4
         end_idx = (model_inputs["cache_position"][-1] + 1) * 4
-
-        # model_inputs["encoder_inputs_embeds"] = self.encoder_inputs_embeds[:, start_idx:end_idx, :]
-        # model_inputs.pop("input_features", None)
-
-        start_idx *= 2
-        end_idx *= 2
-        model_inputs["input_features"] = input_features[..., start_idx:end_idx]
+        model_inputs["encoder_inputs_embeds"] = encoder_inputs_embeds[:, start_idx:end_idx, :]
 
         return model_inputs
+
+    def _prepare_model_inputs(
+        self,
+        inputs: torch.Tensor | None = None,
+        bos_token_id: torch.Tensor | None = None,
+        model_kwargs: dict[str, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, str | None, dict[str, torch.Tensor]]:
+        inputs, input_name, model_kwargs = super()._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
+
+        input_features = model_kwargs.pop("input_features", None)
+        if input_features is not None:
+            model_kwargs["encoder_inputs_embeds"] = self.audio_tower.embedder(input_features)
+
+        return inputs, input_name, model_kwargs
 
     def _update_model_kwargs_for_generation(
         self,
@@ -829,6 +825,54 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             model_kwargs["padding_cache"] = outputs.padding_cache
 
         return model_kwargs
+
+    def _prepare_cache_for_generation(
+        self,
+        generation_config,
+        model_kwargs: dict,
+        generation_mode,
+        batch_size: int,
+        max_cache_length: int,
+    ):
+        super()._prepare_cache_for_generation(
+            generation_config, model_kwargs, generation_mode, batch_size, max_cache_length
+        )
+
+        # NOTE: we use the encoder prefix here this is not a classical encoder-decoder model - no cross-attention
+        # the model is better seen as a VLM/ AudioLM, so with an encoder that can take psat_key_values for it's forward pass
+        if generation_config.cache_implementation is not None:
+            if generation_config.cache_implementation in ("static", "offloaded_static"):
+                model_kwargs["encoder_past_key_values"] = self._get_encoder_cache(
+                    cache_implementation=generation_config.cache_implementation,
+                    batch_size=batch_size,
+                    max_cache_len=750,
+                )
+            else:
+                raise ValueError(f"TODO: {generation_config.cache_implementation}")
+
+    def _get_encoder_cache(self, cache_implementation: str, batch_size: int, max_cache_len: int) -> Cache:
+        offload_cache = "offloaded" in cache_implementation
+
+        if hasattr(self, "_encoder_cache"):
+            cache_to_check = self._encoder_cache
+
+        need_new_cache = (
+            not hasattr(self, "_encoder_cache")
+            or cache_to_check.offloading != offload_cache
+            or cache_to_check.max_batch_size != batch_size
+            or cache_to_check.max_cache_len < max_cache_len
+        )
+
+        if need_new_cache:
+            self_attention_cache_kwargs = {
+                "config": self.config.audio_config,
+                "max_cache_len": max_cache_len,
+                "offloading": offload_cache,
+            }
+            self._encoder_cache = StaticCache(**self_attention_cache_kwargs)
+        else:
+            self._encoder_cache.reset()
+        return self._encoder_cache
 
 
 __all__ = ["VoxtralStreamingForConditionalGeneration", "VoxtralStreamingEncoder"]

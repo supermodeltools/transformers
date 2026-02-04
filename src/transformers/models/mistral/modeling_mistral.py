@@ -262,6 +262,10 @@ class MistralDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
 
         if self.ada_rms_norm is not None:
+            if not hasattr(self, 't_cond_value'):
+                self.t_cond_value = self.ada_rms_norm(t_cond)
+
+            # assert torch.equal(self.t_cond_value, self.ada_rms_norm(t_cond)), "t_cond value has changed"
             hidden_states = hidden_states * (1 + self.ada_rms_norm(t_cond))
 
         hidden_states = self.mlp(hidden_states)
