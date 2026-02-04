@@ -956,10 +956,11 @@ class GroupedGemmParallel(TensorParallelLayer):
         start = device * shard_size
         end = (device+1) * shard_size
         # special case we don't "shard" just send this entire tensor to the correct rank.
-        if start <= tensor_idx < end:
+        shape = param.get_shape() if not isinstance(param, torch.Tensor) else param.shape
+        if tensor_idx is not None and start <= tensor_idx < end:
             # this tensor does need to be materialized on this device:
             return param[:].to(device=device)
-        elif len(param.get_shape()) >=1:
+        elif len(shape) >=1 and tensor_idx is not None:
             return torch.empty([], dtype=dtype, device=device)
         else: # bias case
             return param[:].to(device=device, dtype=dtype)
