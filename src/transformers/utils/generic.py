@@ -927,10 +927,10 @@ def check_model_inputs(func=None, *, tie_last_hidden_states=True):
 
             # _can_record_outputs is None by default
             capture_flags = _CAN_RECORD_REGISTRY.get(str(self.__class__)) or {}  # there is a weak ref for executorch
-            # Explicit `None` in kwargs means "use config default", not "disable". This happens when wrapper                   
+            # Explicit `None` in kwargs means "use config default", not "disable". This happens when wrapper
             # models pass output_hidden_states=None to inner models without resolving from their own config.
-            recordable_keys = {                                                                                                
-                f"output_{k}": (                                                  
+            recordable_keys = {
+                f"output_{k}": (
                     value
                     if (value := all_args.get(f"output_{k}")) is not None
                     else getattr(

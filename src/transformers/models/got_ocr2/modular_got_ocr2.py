@@ -30,7 +30,6 @@ from ..llava.modeling_llava import (
     LlavaModel,
     LlavaModelOutputWithPast,
     LlavaPreTrainedModel,
-    TransformersKwargs,
 )
 from ..sam.modeling_sam import (
     SamMLPBlock,
