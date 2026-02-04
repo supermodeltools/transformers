@@ -4758,6 +4758,7 @@ class PreTrainedAudioTokenizerBase(PreTrainedModel):
     def decode(self, audio_codes: torch.Tensor, *args, **kwargs):
         """Decode from discrete audio codebooks back to raw audio"""
 
+
 def empty_function(x: int):
     # This is just here to trigger the full CI by modifying a core file, and should definitely be removed before merging
     return x + 1
