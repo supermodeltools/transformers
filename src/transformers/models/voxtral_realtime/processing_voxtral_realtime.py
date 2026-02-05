@@ -36,7 +36,7 @@ from ...tokenization_utils_base import PreTokenizedInput, TextInput
 logger = logging.get_logger(__name__)
 
 
-class VoxtralStreamingAudioKwargs(AudioKwargs, total=False):
+class VoxtralRealtimeAudioKwargs(AudioKwargs, total=False):
     """
     is_first_iteration (`bool`, *optional*):
         Whether this is the first iteration of processing.
@@ -45,8 +45,8 @@ class VoxtralStreamingAudioKwargs(AudioKwargs, total=False):
     is_first_iteration: bool | None
 
 
-class VoxtralStreamingProcessorKwargs(ProcessingKwargs, total=False):
-    audio_kwargs: VoxtralStreamingAudioKwargs
+class VoxtralRealtimeProcessorKwargs(ProcessingKwargs, total=False):
+    audio_kwargs: VoxtralRealtimeAudioKwargs
     _defaults = {
         "text_kwargs": {
             "padding": True,
@@ -62,16 +62,16 @@ class VoxtralStreamingProcessorKwargs(ProcessingKwargs, total=False):
 
 
 @auto_docstring
-class VoxtralStreamingProcessor(ProcessorMixin):
+class VoxtralRealtimeProcessor(ProcessorMixin):
     def __init__(self, feature_extractor, tokenizer):
         super().__init__(feature_extractor, tokenizer)
 
     def __call__(
         self,
         audio: AudioInput | None = None,
-        **kwargs: Unpack[VoxtralStreamingProcessorKwargs],
+        **kwargs: Unpack[VoxtralRealtimeProcessorKwargs],
     ):
-        output_kwargs = self._merge_kwargs(VoxtralStreamingProcessorKwargs, **kwargs)
+        output_kwargs = self._merge_kwargs(VoxtralRealtimeProcessorKwargs, **kwargs)
 
         audio = make_list_of_audio(audio)
         input_ids, texts, audio_arrays = [], [], []
@@ -102,4 +102,4 @@ class VoxtralStreamingProcessor(ProcessorMixin):
         return BatchFeature(data=encoding, tensor_type=return_tensors)
 
 
-__all__ = ["VoxtralStreamingProcessor"]
+__all__ = ["VoxtralRealtimeProcessor"]

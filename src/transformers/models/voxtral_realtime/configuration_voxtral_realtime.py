@@ -18,11 +18,11 @@ from ..auto import CONFIG_MAPPING, AutoConfig
 from ..mistral.configuration_mistral import MistralConfig
 
 
-class VoxtralStreamingTextConfig(MistralConfig):
-    model_type = "voxtral_streaming_text"
+class VoxtralRealtimeTextConfig(MistralConfig):
+    model_type = "voxtral_realtime_text"
 
 
-class VoxtralStreamingEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin):
+class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin):
     r"""
     This is the configuration class to store the configuration of a [`VoxtralEncoder`]. It is used to instantiate a
     Voxtral audio encoder according to the specified arguments, defining the model architecture. Instantiating a
@@ -72,7 +72,7 @@ class VoxtralStreamingEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin
     >>> configuration = model.config
     ```"""
 
-    model_type = "voxtral_streaming_encoder"
+    model_type = "voxtral_realtime_encoder"
 
     attribute_map = {
         "d_model": "hidden_size",
@@ -131,7 +131,7 @@ class VoxtralStreamingEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin
         super().__init__(**kwargs)
 
 
-class VoxtralStreamingConfig(PreTrainedConfig):
+class VoxtralRealtimeConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`VoxtralForConditionalGeneration`]. It is used to instantiate an
     Voxtral model according to the specified arguments, defining the model architecture. Instantiating a configuration
@@ -165,7 +165,7 @@ class VoxtralStreamingConfig(PreTrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "voxtral_streaming"
+    model_type = "voxtral_realtime"
     sub_configs = {"text_config": AutoConfig, "audio_config": AutoConfig}
 
     _default_text_config_kwargs = {
@@ -193,19 +193,19 @@ class VoxtralStreamingConfig(PreTrainedConfig):
         **kwargs,
     ):
         if isinstance(audio_config, dict):
-            audio_config["model_type"] = audio_config.get("model_type", "voxtral_streaming_encoder")
+            audio_config["model_type"] = audio_config.get("model_type", "voxtral_realtime_encoder")
             audio_config = CONFIG_MAPPING[audio_config["model_type"]](**audio_config)
         elif audio_config is None:
-            audio_config = CONFIG_MAPPING["voxtral_streaming_encoder"]()
+            audio_config = CONFIG_MAPPING["voxtral_realtime_encoder"]()
         self.audio_config = audio_config
 
         if isinstance(text_config, dict):
-            text_config["model_type"] = text_config.get("model_type", "mistral")
+            text_config["model_type"] = text_config.get("model_type", "voxtral_realtime_text")
             text_config = CONFIG_MAPPING[text_config["model_type"]](
                 **{**self._default_text_config_kwargs, **text_config}
             )
         elif text_config is None:
-            text_config = CONFIG_MAPPING["mistral"](**self._default_text_config_kwargs)
+            text_config = CONFIG_MAPPING["voxtral_realtime_text"](**self._default_text_config_kwargs)
         self.text_config = text_config
 
         self.hidden_size = text_config.hidden_size
@@ -215,4 +215,4 @@ class VoxtralStreamingConfig(PreTrainedConfig):
         super().__init__(**kwargs)
 
 
-__all__ = ["VoxtralStreamingEncoderConfig", "VoxtralStreamingConfig", "VoxtralStreamingTextConfig"]
+__all__ = ["VoxtralRealtimeEncoderConfig", "VoxtralRealtimeConfig", "VoxtralRealtimeTextConfig"]s

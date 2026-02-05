@@ -35,7 +35,7 @@ from ...models.voxtral.modeling_voxtral import (
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.generic import check_model_inputs
-from .configuration_voxtral_streaming import VoxtralStreamingEncoderConfig
+from .configuration_voxtral_realtime import VoxtralRealtimeEncoderConfig
 from ...models.lasr.feature_extraction_lasr import LasrFeatureExtractor
 from ...audio_utils import mel_filter_bank
 
@@ -43,7 +43,7 @@ from ...audio_utils import mel_filter_bank
 logger = logging.get_logger(__name__)
 
 
-class VoxtralStreamingFeatureExtractor(LasrFeatureExtractor):
+class VoxtralRealtimeFeatureExtractor(LasrFeatureExtractor):
     def __init__(
         self,
         feature_size=128,
@@ -127,7 +127,7 @@ class Conv1dCacheLayer:
         return current_cache
 
 
-class VoxtralStreamingConv1dPaddingCache:
+class VoxtralRealtimeConv1dPaddingCache:
     def __init__(self, config):
         if not hasattr(config, "_conv_config"):
             raise ValueError("TODO")
@@ -141,14 +141,14 @@ class VoxtralStreamingConv1dPaddingCache:
 
 
 @dataclass
-class VoxtralStreamingEncoderOutput(BaseModelOutputWithPast):
-    padding_cache: VoxtralStreamingConv1dPaddingCache | None = None
+class VoxtralRealtimeEncoderOutput(BaseModelOutputWithPast):
+    padding_cache: VoxtralRealtimeConv1dPaddingCache | None = None
 
 
-class VoxtralStreamingRotaryEmbedding(LlamaRotaryEmbedding): ...
+class VoxtralRealtimeRotaryEmbedding(LlamaRotaryEmbedding): ...
 
 
-class VoxtralStreamingCausalConv1d(nn.Conv1d):
+class VoxtralRealtimeCausalConv1d(nn.Conv1d):
     def __init__(
         self,
         in_channels: int,
@@ -176,10 +176,10 @@ class VoxtralStreamingCausalConv1d(nn.Conv1d):
         return super().forward(x)
 
 
-class VoxtralStreamingRMSNorm(MistralRMSNorm): ...
+class VoxtralRealtimeRMSNorm(MistralRMSNorm): ...
 
 
-class VoxtralStreamingAttention(MistralAttention):
+class VoxtralRealtimeAttention(MistralAttention):
     def __init__(self, config, layer_idx: int):
         super().__init__(config, layer_idx)
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=True)
@@ -188,18 +188,18 @@ class VoxtralStreamingAttention(MistralAttention):
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=True)
 
 
-class VoxtralStreamingMLP(MistralMLP):
+class VoxtralRealtimeMLP(MistralMLP):
     def __init__(self, config):
         super().__init__(config)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=True)
 
 
-class VoxtralStreamingEmbedder(nn.Module):
+class VoxtralRealtimeEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.conv1 = VoxtralStreamingCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3, conv_layer_idx=0)
-        self.conv2 = VoxtralStreamingCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2, conv_layer_idx=1)
+        self.conv1 = VoxtralRealtimeCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3, conv_layer_idx=0)
+        self.conv2 = VoxtralRealtimeCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2, conv_layer_idx=1)
 
     def forward(self, input_features, padding_cache=None):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features, padding_cache=padding_cache))
@@ -208,17 +208,17 @@ class VoxtralStreamingEmbedder(nn.Module):
         return inputs_embeds
 
 
-class VoxtralStreamingEncoderLayer(GradientCheckpointingLayer):
+class VoxtralRealtimeEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx: int):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = VoxtralStreamingAttention(config, layer_idx)
-        self.self_attn_layer_norm = VoxtralStreamingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn = VoxtralRealtimeAttention(config, layer_idx)
+        self.self_attn_layer_norm = VoxtralRealtimeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
         self.activation_dropout = config.activation_dropout
-        self.final_layer_norm = VoxtralStreamingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.mlp = VoxtralStreamingMLP(config)
+        self.final_layer_norm = VoxtralRealtimeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = VoxtralRealtimeMLP(config)
 
     def forward(
         self,
@@ -263,7 +263,7 @@ class VoxtralStreamingEncoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
-class VoxtralStreamingPreTrainedModel(VoxtralPreTrainedModel, PreTrainedModel):
+class VoxtralRealtimePreTrainedModel(VoxtralPreTrainedModel, PreTrainedModel):
     @torch.no_grad()
     def _init_weights(self, module):
         PreTrainedModel._init_weights(module)
@@ -274,36 +274,36 @@ class VoxtralStreamingPreTrainedModel(VoxtralPreTrainedModel, PreTrainedModel):
 
 @auto_docstring(
     custom_intro="""
-    The VoxtralStreaming encoder, which is a Whisper encoder.
+    The VoxtralRealtime encoder, which is a Whisper encoder.
     """
 )
-class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
+class VoxtralRealtimeEncoder(VoxtralRealtimePreTrainedModel):
     """
     Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
-    [`VoxtralStreamingEncoderLayer`].
+    [`VoxtralRealtimeEncoderLayer`].
 
     Args:
-        config: VoxtralStreamingEncoderConfig
+        config: VoxtralRealtimeEncoderConfig
     """
 
     # Ignore copy
-    config: VoxtralStreamingEncoderConfig
+    config: VoxtralRealtimeEncoderConfig
     main_input_name = "input_features"
     input_modalities = "audio"
-    _no_split_modules = ["VoxtralStreamingEncoderLayer"]
+    _no_split_modules = ["VoxtralRealtimeEncoderLayer"]
     _can_record_outputs = {
-        "attentions": VoxtralStreamingAttention,
-        "hidden_states": VoxtralStreamingEncoderLayer,
+        "attentions": VoxtralRealtimeAttention,
+        "hidden_states": VoxtralRealtimeEncoderLayer,
     }
 
     def __init__(self, config):
         super().__init__(config)
-        self.embedder = VoxtralStreamingEmbedder(config)
+        self.embedder = VoxtralRealtimeEmbedder(config)
         self.layers = nn.ModuleList(
-            [VoxtralStreamingEncoderLayer(config, layer_idx) for layer_idx in range(config.encoder_layers)]
+            [VoxtralRealtimeEncoderLayer(config, layer_idx) for layer_idx in range(config.encoder_layers)]
         )
-        self.norm = VoxtralStreamingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = VoxtralStreamingRotaryEmbedding(config=config)
+        self.norm = VoxtralRealtimeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = VoxtralRealtimeRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
@@ -328,7 +328,7 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
             raise ValueError("You must specify exactly one of input_features or inputs_embeds")
 
         if use_padding_cache and padding_cache is None:
-            padding_cache = VoxtralStreamingConv1dPaddingCache(config=self.config)
+            padding_cache = VoxtralRealtimeConv1dPaddingCache(config=self.config)
 
         if inputs_embeds is None:
             inputs_embeds = self.embedder(input_features, padding_cache)
@@ -370,14 +370,14 @@ class VoxtralStreamingEncoder(VoxtralStreamingPreTrainedModel):
             )
 
         hidden_states = self.norm(hidden_states)
-        return VoxtralStreamingEncoderOutput(
+        return VoxtralRealtimeEncoderOutput(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             padding_cache=padding_cache,
         )
 
 
-class VoxtralStreamingTextAdaRmsNorm(nn.Module):
+class VoxtralRealtimeTextAdaRmsNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
         # TODO: how to add the intermediate size to the config? since it already the mistral one? new model? new config only?
@@ -391,16 +391,16 @@ class VoxtralStreamingTextAdaRmsNorm(nn.Module):
         return hidden_states
 
 
-class VoxtralStreamingTextAttention(MistralAttention): ...
+class VoxtralRealtimeTextAttention(MistralAttention): ...
 
 
-class VoxtralStreamingTextMLP(MistralMLP): ...
+class VoxtralRealtimeTextMLP(MistralMLP): ...
 
 
-class VoxtralStreamingTextDecoderLayer(MistralDecoderLayer):
+class VoxtralRealtimeTextDecoderLayer(MistralDecoderLayer):
     def __init__(self, config, layer_idx):
         super().__init__(config, layer_idx)
-        self.ada_rms_norm = VoxtralStreamingTextAdaRmsNorm(config)
+        self.ada_rms_norm = VoxtralRealtimeTextAdaRmsNorm(config)
 
     def forward(
         self,
@@ -439,7 +439,7 @@ class VoxtralStreamingTextDecoderLayer(MistralDecoderLayer):
         return hidden_states
 
 
-class VoxtralStreamingTextForCausalLM(MistralForCausalLM): ...
+class VoxtralRealtimeTextForCausalLM(MistralForCausalLM): ...
 
 
 class TimeEmbedding(nn.Module):
@@ -459,7 +459,7 @@ class TimeEmbedding(nn.Module):
         return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
 
 
-class VoxtralStreamingForConditionalGeneration(VoxtralForConditionalGeneration, GenerationMixin):
+class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, GenerationMixin):
     def __init__(self, config):
         super().__init__(config)
         self.time_embedding = TimeEmbedding(config.text_config.hidden_size)
@@ -578,7 +578,7 @@ class VoxtralStreamingForConditionalGeneration(VoxtralForConditionalGeneration, 
         bos_token_id: torch.Tensor | None = None,
         model_kwargs: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, str | None, dict[str, torch.Tensor]]:
-        inputs, input_name, model_kwargs = VoxtralStreamingPreTrainedModel._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
+        inputs, input_name, model_kwargs = VoxtralRealtimePreTrainedModel._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
 
         input_features = model_kwargs.pop("input_features", None)
         if input_features is not None:
@@ -653,8 +653,8 @@ class VoxtralStreamingForConditionalGeneration(VoxtralForConditionalGeneration, 
 
 
 __all__ = [
-    "VoxtralStreamingForConditionalGeneration",
-    "VoxtralStreamingEncoder",
-    "VoxtralStreamingTextForCausalLM",
-    "VoxtralStreamingFeatureExtractor",
+    "VoxtralRealtimeForConditionalGeneration",
+    "VoxtralRealtimeEncoder",
+    "VoxtralRealtimeTextForCausalLM",
+    "VoxtralRealtimeFeatureExtractor",
 ]
