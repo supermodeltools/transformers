@@ -317,7 +317,9 @@ def repack_weights(
     return final_ordered_tensor
 
 
-def get_tensor_shard(param, empty_param, device_mesh, rank, dim, tensor_idx: int | None = None):
+def get_tensor_shard(
+    param, empty_param, device_mesh, rank, dim, tensor_idx: int | None = None
+):
     """
     Generalized tensor sharding across a multi-dimensional device mesh.
     Extract only the fraction of the parameter owned by the given `rank` when the parameter would have gone sharding at provided `dim`.
@@ -370,7 +372,6 @@ def get_tensor_shard(param, empty_param, device_mesh, rank, dim, tensor_idx: int
         dim (int): Dimension along which to shard the tensor.
     """
     param_dim = empty_param.ndim
-    # Flatten the mesh to get the total number of devices
     mesh_shape = device_mesh.shape
     world_size = reduce(operator.mul, mesh_shape)
     # Get param shape: works for both torch.Tensor and safetensors TensorInfo
@@ -382,9 +383,9 @@ def get_tensor_shard(param, empty_param, device_mesh, rank, dim, tensor_idx: int
     elif empty_param.dim() == 3 and dim == 2 and len(param_shape) == 2:
         dim = 0
 
-    shard_size = math.ceil(empty_param.size(dim) / world_size)
+    shard_size = math.ceil(param_shape[dim] / world_size)
     start = rank * shard_size
-    end = min(start + shard_size, empty_param.size(dim))
+    end = min(start + shard_size, param_shape[dim])
 
     if dim >= param_dim:
         raise ValueError(f"dim {dim} is out of bounds for tensor of dimension {param_dim}")
@@ -401,7 +402,7 @@ def get_tensor_shard(param, empty_param, device_mesh, rank, dim, tensor_idx: int
     # actually we still shard dim=0 does not change
     # so only case is if the dim of the empty param is 3 and the shard dim is 0 -> we put the
     # tensor on a certain device (with the input tensor_index)
-    if empty_param.dim() == 3 and dim == 0 and len(param_shape) == 2:
+    if tensor_idx is not None and empty_param.dim() == 3 and dim == 0 and len(param_shape) == 2:
         # special case we don't "shard" just send this entire tensor to the correct rank.
         if start <= tensor_idx < end:
             # this tensor does need to be materialized on this device:
@@ -707,9 +708,9 @@ class ColwiseParallel(TensorParallelLayer):
         # If only 1 dim, shard this one (usually it's a `bias`)
         dim = param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
         if dim == 1:
-            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx)
+            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1)
         else:
-            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -2, tensor_idx)
+            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -2)
         return parameter.to(device=device, dtype=dtype)
 
     def get_expected_sharded_shape(self, full_shape: tuple[int, ...] | torch.Size) -> tuple[int, ...]:
@@ -724,6 +725,7 @@ class ColwiseParallel(TensorParallelLayer):
         shape[dim] = end - start
         return tuple(shape)
 
+
 class AllReduce(TensorParallelLayer):
     """
     Column-wise parallel: weight is sharded on dim -2 (output features).
@@ -737,13 +739,12 @@ class AllReduce(TensorParallelLayer):
     @staticmethod
     def _prepare_input_fn(mod, inputs, device_mesh):
         if not getattr(mod, "_modified_for_tp", False):
-            mod.num_experts = (mod.num_experts // device_mesh.size())
+            mod.num_experts = mod.num_experts // device_mesh.size()
             mod._modified_for_tp = True
         return inputs
 
     def _prepare_output_fn(self, mod, outputs, device_mesh):
         return all_reduce_forward(outputs, device_mesh)
-
 
 
 class RowwiseParallel(TensorParallelLayer):
@@ -787,9 +788,7 @@ class RowwiseParallel(TensorParallelLayer):
         if dim == 1:
             parameter = param[...]
         else:
-            parameter = get_tensor_shard(
-                param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx=tensor_idx
-            )
+            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1)
         return parameter.to(device=device, dtype=dtype)
 
     def get_expected_sharded_shape(self, full_shape: tuple[int, ...] | torch.Size) -> tuple[int, ...]:
@@ -816,9 +815,18 @@ class PackedColwiseParallel(ColwiseParallel):
         # If only 1 dim, shard this one (usually it's a `bias`)
         dim = param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
         if dim == 1:
-            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx)
+            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1)
         else:
-            parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -2)
+            expected_shape = self.get_expected_sharded_shape(self.empty_param.shape)
+            if dim < len(expected_shape):
+                # Input is unpacked (e.g., gate_proj that will be concatenated to gate_up_proj)
+                # Use regular tensor shard - concatenation will happen after
+                parameter = get_tensor_shard(
+                    param, self.empty_param, self.device_mesh, self.rank, -2
+                )
+            else:
+                # Input is already packed, use packed sharding
+                parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -2)
         return parameter.to(device=device, dtype=dtype)
 
 
@@ -833,7 +841,18 @@ class PackedRowwiseParallel(RowwiseParallel):
         if dim == 1:
             parameter = param[...]
         else:
-            parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -1)
+            # Check if input tensor is unpacked (shape mismatch with expected packed size)
+            # This happens when using MergeModulelist + Concatenate for fused weights like gate_up_proj
+            param_shape = param.shape if isinstance(param, torch.Tensor) else param.get_shape()
+            expected_packed_dim = self.empty_param.shape[-1] if self.empty_param.dim() >= 1 else 0
+            actual_dim = param_shape[-1] if len(param_shape) >= 1 else 0
+
+            if actual_dim < expected_packed_dim:
+                # Input is unpacked, use regular tensor shard
+                parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1)
+            else:
+                # Input is already packed, use packed sharding
+                parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -1)
         return parameter.to(device=device, dtype=dtype)
 
 
@@ -887,9 +906,7 @@ class EmbeddingParallel(TensorParallelLayer):
         # If only 1 dim, shard this one (usually it's a `bias`)
         dim = param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
         if dim == 1:
-            parameter = get_tensor_shard(
-                param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx=tensor_idx
-            )
+            parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1)
         else:
             parameter = get_tensor_shard(
                 param,
@@ -897,7 +914,6 @@ class EmbeddingParallel(TensorParallelLayer):
                 self.device_mesh,
                 self.rank,
                 self.embedding_dim_sharding,
-                tensor_idx=tensor_idx,
             )
         return parameter.to(device=device, dtype=dtype)
 
@@ -961,17 +977,17 @@ class GroupedGemmParallel(TensorParallelLayer):
         if isinstance(device, torch.device):
             device = device.index if device.index is not None else 0
         start = device * shard_size
-        end = (device+1) * shard_size
+        end = (device + 1) * shard_size
         # special case we don't "shard" just send this entire tensor to the correct rank.
         shape = param.get_shape() if not isinstance(param, torch.Tensor) else param.shape
         if tensor_idx is not None and start <= tensor_idx < end:
             # this tensor does need to be materialized on this device:
             return param[:].to(device=device)
-        elif tensor_idx is None: # a bias or a weight, but already merged
+        elif tensor_idx is None:  # a bias or a weight, but already merged
             return param[start:end].to(device=device, dtype=dtype)
-        elif len(shape) >=1 and tensor_idx is not None:
+        elif len(shape) >= 1 and tensor_idx is not None:
             return None
-        else: # bias case
+        else:  # bias case
             return param[:].to(device=device, dtype=dtype)
 
     def get_expected_sharded_shape(self, full_shape: tuple[int, ...] | torch.Size) -> tuple[int, ...]:

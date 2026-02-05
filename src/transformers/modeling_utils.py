@@ -113,7 +113,6 @@ from .utils import (
     is_grouped_mm_available,
     is_kernels_available,
     is_torch_flex_attn_available,
-    is_torch_greater_or_equal,
     is_torch_mlu_available,
     is_torch_npu_available,
     is_torch_xpu_available,
@@ -249,8 +248,7 @@ def get_torch_context_manager_or_global_device():
     is not "cpu". This is used to infer the correct device to load the model on, in case `device_map` is not provided.
     """
     device_in_context = torch.tensor([]).device
-    # `get_default_device` was only introduced in torch>=2.3 - use cpu otherwise to align the behavior
-    default_device = torch.get_default_device() if is_torch_greater_or_equal("2.3") else torch.device("cpu")
+    default_device = torch.get_default_device()
     # This case means no context manager was used -> we still check if the default that was potentially set is not cpu
     if device_in_context == default_device:
         if default_device != torch.device("cpu"):
@@ -278,21 +276,18 @@ str_to_torch_dtype = {
     "U8": torch.uint8,
     "I8": torch.int8,
     "I16": torch.int16,
+    "U16": torch.uint16,
     "F16": torch.float16,
     "BF16": torch.bfloat16,
     "I32": torch.int32,
+    "U32": torch.uint32,
     "F32": torch.float32,
     "F64": torch.float64,
     "I64": torch.int64,
+    "U64": torch.uint64,
     "F8_E4M3": torch.float8_e4m3fn,
     "F8_E5M2": torch.float8_e5m2,
 }
-
-
-if is_torch_greater_or_equal("2.3.0"):
-    str_to_torch_dtype["U16"] = torch.uint16
-    str_to_torch_dtype["U32"] = torch.uint32
-    str_to_torch_dtype["U64"] = torch.uint64
 
 
 def load_state_dict(
@@ -2324,7 +2319,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         try:
             self._init_weights(module)
         except Exception as e:
-            pass
+            raise e
         module._is_hf_initialized = True
 
     @torch.no_grad()
@@ -4213,35 +4208,35 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         """Perform all post processing operations after having loaded some checkpoints into a model, such as moving
         missing keys from meta device to their expected device, reinitializing missing weights according to proper
         distributions, tying the weights and logging the loading report."""
+        try:
+            # Marks tied weights as `_is_hf_initialized` to avoid initializing them (it's very important for efficiency)
+            model.mark_tied_weights_as_initialized()
 
-        # Marks tied weights as `_is_hf_initialized` to avoid initializing them (it's very important for efficiency)
-        model.mark_tied_weights_as_initialized()
+            # Move missing (and potentially mismatched) keys and non-persistent buffers back to their expected device from
+            # meta device (because they were not moved when loading the weights as they were not in the loaded state dict)
+            model._move_missing_keys_from_meta_to_device(
+                loading_info.missing_and_mismatched(),
+                load_config.device_map,
+                load_config.device_mesh,
+                load_config.hf_quantizer,
+            )
 
-        # Move missing (and potentially mismatched) keys and non-persistent buffers back to their expected device from
-        # meta device (because they were not moved when loading the weights as they were not in the loaded state dict)
-        model._move_missing_keys_from_meta_to_device(
-            loading_info.missing_and_mismatched(),
-            load_config.device_map,
-            load_config.device_mesh,
-            load_config.hf_quantizer,
-        )
+            # Correctly initialize the missing (and potentially mismatched) keys (all parameters without the `_is_hf_initialized` flag)
+            model._initialize_missing_keys(load_config.is_quantized)
 
-        # Correctly initialize the missing (and potentially mismatched) keys (all parameters without the `_is_hf_initialized` flag)
-        model._initialize_missing_keys(load_config.is_quantized)
+            # Tie the weights
+            model.tie_weights(missing_keys=loading_info.missing_keys, recompute_mapping=False)
 
-        # Tie the weights
-        model.tie_weights(missing_keys=loading_info.missing_keys, recompute_mapping=False)
-
-        # Adjust missing and unexpected keys
-        model._adjust_missing_and_unexpected_keys(loading_info)
-
-        log_state_dict_report(
-            model=model,
-            pretrained_model_name_or_path=load_config.pretrained_model_name_or_path,
-            ignore_mismatched_sizes=load_config.ignore_mismatched_sizes,
-            loading_info=loading_info,
-            logger=logger,
-        )
+            # Adjust missing and unexpected keys
+            model._adjust_missing_and_unexpected_keys(loading_info)
+        finally:
+            log_state_dict_report(
+                model=model,
+                pretrained_model_name_or_path=load_config.pretrained_model_name_or_path,
+                ignore_mismatched_sizes=load_config.ignore_mismatched_sizes,
+                loading_info=loading_info,
+                logger=logger,
+            )
 
         return loading_info
 

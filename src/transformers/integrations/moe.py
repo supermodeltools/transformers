@@ -113,17 +113,26 @@ def batched_mm_experts_forward(
     # Reshape for easier indexing
     # S is the number of selected tokens-experts pairs (S = num_tokens * num_top_k)
     token_idx = torch.arange(num_tokens, device=device).unsqueeze(1).expand(-1, num_top_k).reshape(-1)  # (S,)
+    if top_k_weights.sum() == torch.tensor(0.0, device=top_k_weights.device):
+        # If all routing weights are zero local experts are not selected
+        return torch.zeros_like(hidden_states)
+
     sample_weights = top_k_weights.reshape(-1)  # (S,)
     expert_ids = top_k_index.reshape(-1)  # (S,)
+
+    # Handle invalid expert IDs from Expert Parallelism (EP)
+    # When EP is enabled, tokens assigned to experts on other devices are marked with sentinel value >= num_experts
+    valid_mask = expert_ids < self.num_experts
+    expert_ids_clamped = expert_ids.clamp(0, self.num_experts - 1)
 
     # Get current hidden states for selected samples
     selected_hidden_states = hidden_states[token_idx]
 
-    # Select expert weights and biases for selected samples
-    selected_gate_up = self.gate_up_proj[expert_ids]
-    selected_down = self.down_proj[expert_ids]
-    selected_gate_up_bias = self.gate_up_proj_bias[expert_ids] if self.has_bias else None
-    selected_down_bias = self.down_proj_bias[expert_ids] if self.has_bias else None
+    # Select expert weights and biases for selected samples (using clamped IDs for safe indexing)
+    selected_gate_up = self.gate_up_proj[expert_ids_clamped]
+    selected_down = self.down_proj[expert_ids_clamped]
+    selected_gate_up_bias = self.gate_up_proj_bias[expert_ids_clamped] if self.has_bias else None
+    selected_down_bias = self.down_proj_bias[expert_ids_clamped] if self.has_bias else None
 
     # --- Up projection per expert (batched) ---
     gate_up_out = _batched_linear(
@@ -138,8 +147,11 @@ def batched_mm_experts_forward(
         gated_out, selected_down, selected_down_bias, is_transposed=self.is_transposed
     )  # (S, hidden_dim)
 
-    # Apply routing weights
+    # Apply routing weights and zero out invalid expert contributions
+    if sample_weights.shape != expert_ids_clamped.shape:
+        sample_weights = sample_weights.gather(0, expert_ids_clamped)
     out_per_sample = out_per_sample * sample_weights.unsqueeze(-1)  # (S, hidden_dim)
+    out_per_sample = out_per_sample * valid_mask.unsqueeze(-1).to(out_per_sample.dtype)
 
     # Accumulate results using deterministic reshape+sum instead of index_add_
     # (index_add_ with duplicate indices is non-deterministic on CUDA due to atomicAdd)
@@ -218,11 +230,14 @@ def grouped_mm_experts_forward(
     sample_weights_g = sample_weights[perm]
     selected_hidden_states_g = selected_hidden_states[perm]
 
-    ignored_tokens = sum(expert_ids_g >= self.num_experts)
-    if ignored_tokens.any():
-        sample_weights_g = sample_weights_g[:-ignored_tokens]
-        selected_hidden_states_g = selected_hidden_states_g[:-ignored_tokens]
-        expert_ids_g = expert_ids_g[:-ignored_tokens]
+    # Handle invalid expert IDs from Expert Parallelism (EP)
+    # When EP is enabled, tokens assigned to experts on other devices are marked with sentinel value >= num_experts
+    # Since we sorted by expert_ids, invalid tokens (with highest IDs) are at the end
+    num_invalid = (expert_ids_g >= self.num_experts).sum().item()
+    if num_invalid > 0:
+        sample_weights_g = sample_weights_g[:-num_invalid]
+        selected_hidden_states_g = selected_hidden_states_g[:-num_invalid]
+        expert_ids_g = expert_ids_g[:-num_invalid]
 
     # Select expert weights and biases for selected samples
     # NOTE: We keep all experts here and rely on offsets to target the active ones.
@@ -259,10 +274,13 @@ def grouped_mm_experts_forward(
     out_per_sample_g = out_per_sample_g * sample_weights_g.unsqueeze(-1)  # (S, hidden_dim)
 
     # Restore original order
-    # finally we need to ignore the tokens that were assigned to invalid experts
-    # we have to remove them from the inv_perm.... as out_per_sample_g doesn't contain them
-    # they are not at the end? inv_perm[expert_ids[inv_perm] >= 8]
-    out_per_sample = out_per_sample_g[inv_perm]  # (S, hidden_dim)
+    if num_invalid > 0:
+        out_per_sample = out_per_sample_g[inv_perm.clamp(max=out_per_sample_g.shape[0] - 1)]  # (S, hidden_dim)
+        out_per_sample = out_per_sample * (inv_perm < out_per_sample_g.shape[0]).unsqueeze(-1).to(
+            out_per_sample.dtype
+        )  # Zero out invalid samples
+    else:
+        out_per_sample = out_per_sample_g[inv_perm]  # (S, hidden_dim)
 
     # Accumulate results using deterministic reshape+sum instead of index_add_
     # (index_add_ with duplicate indices is non-deterministic on CUDA due to atomicAdd)
