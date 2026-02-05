@@ -381,7 +381,7 @@ def get_tensor_shard(
     if empty_param.dim() == 3 and dim == 1 and len(param_shape) == 2:
         dim = 0
     elif empty_param.dim() == 3 and dim == 2 and len(param_shape) == 2:
-        dim = 0
+        dim = 1
 
     shard_size = math.ceil(param_shape[dim] / world_size)
     start = rank * shard_size
