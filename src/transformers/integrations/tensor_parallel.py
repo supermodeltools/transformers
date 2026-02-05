@@ -818,7 +818,19 @@ class PackedColwiseParallel(ColwiseParallel):
         if dim == 1:
             parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx)
         else:
-            parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -2)
+            # Check if input tensor is unpacked (shape mismatch with expected packed size)
+            # This happens when using MergeModulelist + Concatenate for fused weights like gate_up_proj
+            param_shape = param.shape if isinstance(param, torch.Tensor) else param.get_shape()
+            expected_packed_dim = self.empty_param.shape[-2] if self.empty_param.dim() >= 2 else 0
+            actual_dim = param_shape[-2] if len(param_shape) >= 2 else 0
+
+            if actual_dim < expected_packed_dim:
+                # Input is unpacked (e.g., gate_proj that will be concatenated to gate_up_proj)
+                # Use regular tensor shard - concatenation will happen after
+                parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -2, tensor_idx)
+            else:
+                # Input is already packed, use packed sharding
+                parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -2)
         return parameter.to(device=device, dtype=dtype)
 
 
@@ -833,7 +845,18 @@ class PackedRowwiseParallel(RowwiseParallel):
         if dim == 1:
             parameter = param[...]
         else:
-            parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -1)
+            # Check if input tensor is unpacked (shape mismatch with expected packed size)
+            # This happens when using MergeModulelist + Concatenate for fused weights like gate_up_proj
+            param_shape = param.shape if isinstance(param, torch.Tensor) else param.get_shape()
+            expected_packed_dim = self.empty_param.shape[-1] if self.empty_param.dim() >= 1 else 0
+            actual_dim = param_shape[-1] if len(param_shape) >= 1 else 0
+
+            if actual_dim < expected_packed_dim:
+                # Input is unpacked, use regular tensor shard
+                parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -1, tensor_idx)
+            else:
+                # Input is already packed, use packed sharding
+                parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -1)
         return parameter.to(device=device, dtype=dtype)
 
 
