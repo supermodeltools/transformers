@@ -2324,7 +2324,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         try:
             self._init_weights(module)
         except Exception as e:
-            pass
+            raise e
         module._is_hf_initialized = True
 
     @torch.no_grad()

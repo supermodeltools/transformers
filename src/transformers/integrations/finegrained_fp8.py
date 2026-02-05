@@ -679,7 +679,7 @@ class FP8Expert(nn.Module):
 
         for expert_idx in expert_hit:
             expert_idx = expert_idx[0]
-            if expert_idx == len(self.gate_up_proj): # weights will load fine
+            if expert_idx == len(self.gate_up_proj):  # weights will load fine
                 continue
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]

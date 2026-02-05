@@ -847,6 +847,7 @@ def log_conversion_errors(
 
         op_name = _format_op_name(op)
         import traceback
+
         tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         if isinstance(extras, tuple) and len(extras) == 2:
             length, target_keys = extras
@@ -856,7 +857,9 @@ def log_conversion_errors(
             )
         elif isinstance(extras, str):
             suffix = f" via {op_name}" if op_name else ""
-            loading_info.conversion_errors[first_target_key] = f"{tb_str}{e}\nError{suffix} when processing parameter {extras}"
+            loading_info.conversion_errors[first_target_key] = (
+                f"{tb_str}{e}\nError{suffix} when processing parameter {extras}"
+            )
         elif extras is None and op_name:
             loading_info.conversion_errors[first_target_key] = f"{op_name}: {e}"
         else:
@@ -1152,7 +1155,11 @@ def convert_and_load_state_dict_in_model(
                         mapping.distributed_operation = tp_layer(
                             device_mesh=device_mesh, rank=device_mesh.get_local_rank(), empty_param=empty_param.clone()
                         )
-                    shard_index = len(mapping.collected_tensors.get(source_pattern, [])) if isinstance(mapping, WeightConverter) and isinstance(mapping.operations[0], MergeModulelist) else None
+                    shard_index = (
+                        len(mapping.collected_tensors.get(source_pattern, []))
+                        if isinstance(mapping, WeightConverter) and isinstance(mapping.operations[0], MergeModulelist)
+                        else None
+                    )
                     future_or_tensor = spawn_tp_materialize(
                         thread_pool,
                         tensor,

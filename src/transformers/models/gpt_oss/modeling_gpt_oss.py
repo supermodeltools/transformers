@@ -87,29 +87,24 @@ class GptOssExperts(nn.Module):
         return gated_output
 
     def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
+        batch_size = hidden_states.shape[0]
+        hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
+        num_experts = routing_weights.shape[1]
         next_states = torch.zeros_like(hidden_states, dtype=hidden_states.dtype, device=hidden_states.device)
         with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(
-                router_indices, num_classes=self.num_experts
-            )  # masking is also a class
+            expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=num_experts + 1)
             expert_mask = expert_mask.permute(2, 1, 0)
-            # we sum on the top_k and on the sequence length to get which experts
-            # are hit this time around
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            # expert_idx only have 1 element, so we can use scale for fast indexing
-            expert_idx = expert_idx[0]
-            # skip masking index
-            if expert_idx == self.num_experts:
-                continue
-            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            expert_hitted = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hitted[:-1]:
+            with torch.no_grad():
+                _, token_idx = torch.where(expert_mask[expert_idx[0]])
             current_state = hidden_states[token_idx]
             gate_up = current_state @ self.gate_up_proj[expert_idx] + self.gate_up_proj_bias[expert_idx]
             gated_output = self._apply_gate(gate_up)
             out = gated_output @ self.down_proj[expert_idx] + self.down_proj_bias[expert_idx]
-            weighted_output = out * routing_weights[token_idx, top_k_pos, None]
+            weighted_output = out[0] * routing_weights[token_idx, expert_idx, None]
             next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
-
+        next_states = next_states.view(batch_size, -1, self.hidden_size)
         return next_states
 
 
