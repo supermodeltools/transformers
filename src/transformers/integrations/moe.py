@@ -276,7 +276,9 @@ def grouped_mm_experts_forward(
     # Restore original order
     if num_invalid > 0:
         out_per_sample = out_per_sample_g[inv_perm.clamp(max=out_per_sample_g.shape[0] - 1)]  # (S, hidden_dim)
-        out_per_sample = out_per_sample * (inv_perm < out_per_sample_g.shape[0]).unsqueeze(-1).to(out_per_sample.dtype)  # Zero out invalid samples
+        out_per_sample = out_per_sample * (inv_perm < out_per_sample_g.shape[0]).unsqueeze(-1).to(
+            out_per_sample.dtype
+        )  # Zero out invalid samples
     else:
         out_per_sample = out_per_sample_g[inv_perm]  # (S, hidden_dim)
 
