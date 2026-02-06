@@ -19,6 +19,7 @@ import unittest
 import pytest
 
 from transformers import BitsAndBytesConfig, is_torch_available
+from transformers.models.ernie4_5_moe.modeling_ernie4_5_moe import load_balancing_loss_func
 from transformers.testing_utils import (
     cleanup,
     is_flaky,
@@ -129,13 +130,23 @@ class Ernie4_5_MoeModelTest(CausalLMModelTest, unittest.TestCase):
         padded_result = model(padded_input_ids, attention_mask=padded_attention_mask)
         torch.testing.assert_close(result.aux_loss.cpu(), padded_result.aux_loss.cpu(), rtol=1e-4, atol=1e-4)
 
-        # We make sure that the loss of including padding tokens != the loss without padding tokens
-        # if attention_mask=None --> we don't exclude padding tokens
-        include_padding_result = model(padded_input_ids, attention_mask=None)
-
-        # This is to mimic torch.testing.assert_not_close, but aux_loss can be numerically identical
-        # across these inputs for some seeds/hardware. We just ensure the loss is finite.
-        self.assertTrue(torch.isfinite(include_padding_result.aux_loss))
+        # We make sure that masking can change the loss using a deterministic synthetic example.
+        # This avoids flakiness when the model routes tokens uniformly.
+        num_experts = 3
+        top_k = 1
+        synthetic_logits = torch.tensor(
+            [
+                [10.0, 0.0, 0.0],  # unmasked token -> expert 0
+                [10.0, 0.0, 0.0],  # unmasked token -> expert 0
+                [0.0, 10.0, 0.0],  # masked token -> expert 1
+                [0.0, 10.0, 0.0],  # masked token -> expert 1
+            ],
+            device=torch_device,
+        )
+        synthetic_mask = torch.tensor([[1, 1, 0, 0]], device=torch_device)
+        masked_loss = load_balancing_loss_func((synthetic_logits,), num_experts, top_k, synthetic_mask)
+        unmasked_loss = load_balancing_loss_func((synthetic_logits,), num_experts, top_k, attention_mask=None)
+        self.assertNotAlmostEqual(masked_loss.item(), unmasked_loss.item(), places=6)
 
 
 @slow
