@@ -495,7 +495,7 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
             **kwargs,
         )
         audio_hidden_states = audio_outputs.last_hidden_state
-        audio_hidden_states = audio_hidden_states.reshape(-1, self.config.audio_config.intermediate_size)
+        audio_hidden_states = audio_hidden_states.reshape(audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size) 
         audio_embeds = self.multi_modal_projector(audio_hidden_states)
         audio_outputs.pooler_output = audio_embeds
 
@@ -531,11 +531,11 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
                 padding_cache=padding_cache,
                 return_dict=True,
             )
-            inputs_embeds += audio_outputs.pooler_output
+            inputs_embeds += audio_outputs.pooler_output.to(inputs_embeds.device)
 
         time_tensor = torch.full(
             (1,),
-            fill_value=6,
+            fill_value=self.config.num_delay_tokens,
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
@@ -650,6 +650,34 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         else:
             self._encoder_cache.reset()
         return self._encoder_cache
+
+    def _prepare_generation_config(
+        self,
+        generation_config,
+        **kwargs,
+    ):
+        generation_config, model_kwargs =  GenerationMixin._prepare_generation_config(generation_config, **kwargs)
+
+        audio_length = model_kwargs["input_features"].shape[-1]
+        num_audio_tokens = math.ceil(audio_length / self.config.audio_length_per_tok)
+
+        # TODO: maybe add a warning here in case user's trying to set max_new_tokens
+        generation_config.max_length = num_audio_tokens
+        return generation_config, model_kwargs
+
+    def _prepare_generated_length(
+        self,
+        generation_config,
+        has_default_max_length,
+        has_default_min_length,
+        model_input_name,
+        input_ids_length,
+        inputs_tensor,
+    ):
+        # since we update max_length manually in the abobe _prepare_generation_config
+        # we need to force has_default_max_length to False
+        has_default_max_length = False
+        return GenerationMixin._prepare_generated_length(generation_config, has_default_max_length, has_default_min_length, model_input_name, input_ids_length, inputs_tensor)
 
 
 __all__ = [

@@ -35,7 +35,7 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
     documentation from [`PreTrainedConfig`] for more information.
 
     Args:
-        vocab_size (`int`, *optional*, defaults to 51866):
+        vocab_size (`int`, *optional*, defaults to 131072):
             Vocabulary size of the model.
         hidden_size (`int`, *optional*, defaults to 1280):
             Dimensionality of the hidden representations.
@@ -43,7 +43,7 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
             Dimension of the MLP representations.
         num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer encoder.
-        num_attention_heads (`int`, *optional*, defaults to 20):
+        num_attention_heads (`int`, *optional*, defaults to 32):
             Number of attention heads for each attention layer in the Transformer encoder.
         scale_embedding (`bool`, *optional*, defaults to `False`):
             Scale embeddings by dividing by sqrt(hidden_size) if True.
@@ -84,7 +84,7 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
 
     def __init__(
         self,
-        vocab_size=51866,
+        vocab_size=131072,
         hidden_size=1280,
         intermediate_size=5120,
         num_hidden_layers=32,
@@ -95,6 +95,16 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
         max_source_positions=1500,
         initializer_range=0.02,
         attention_dropout=0.0,
+        hidden_act="silu",
+        max_position_embeddings=1500,
+        rms_norm_eps=1e-05,
+        rope_parameters={
+            "rope_theta": 1000000.0,
+        },
+        sliding_window=750,
+        head_dim=64,
+
+
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -109,25 +119,14 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
         self.max_source_positions = max_source_positions
         self.initializer_range = initializer_range
         self.num_key_value_heads = num_attention_heads
-        self.rms_norm_eps = 1e-5
-        self.max_position_embeddings = 1500
-        self.rope_parameters = {
-            "rope_theta": 1e6,
-        }
-        self.mlp_bias = True
-        self.hidden_act = "silu"
-        self.head_dim = 64
-        self.sliding_window = 750
-
-        # TODO: @eustlb, we do not use dropout and layerdrop, yet we need to hardcode them
-        # to be able to use Whisper with modular (here actually from Qwen2-Audio and copied from).
-        # After a future Whisper refactor, we should remove this.
-        self.dropout = 0.0
-        self.layerdrop = 0.0
-        self.activation_dropout = 0.0
-        self.sliding_window = None
-
+        self.rms_norm_eps = rms_norm_eps
+        self.max_position_embeddings = max_position_embeddings
+        self.rope_parameters = rope_parameters
+        self.hidden_act = hidden_act
+        self.sliding_window = sliding_window
+        self.head_dim = head_dim if head_dim is not None else hidden_size // num_attention_heads
         self.attention_dropout = attention_dropout
+
         super().__init__(**kwargs)
 
 
@@ -178,7 +177,7 @@ class VoxtralRealtimeConfig(PreTrainedConfig):
         "max_position_embeddings": 131072,
         "rms_norm_eps": 1e-05,
         "use_cache": True,
-        "rope_theta": 100000000.0,
+        "rope_theta": 1000000.0,
         "head_dim": 128,
         "tie_word_embeddings": True,
         "sliding_window": 8192,
@@ -190,6 +189,8 @@ class VoxtralRealtimeConfig(PreTrainedConfig):
         text_config=None,
         audio_token_id=None,
         projector_hidden_act="gelu",
+        audio_length_per_tok=8,
+        num_delay_tokens=32,
         **kwargs,
     ):
         if isinstance(audio_config, dict):
@@ -211,8 +212,8 @@ class VoxtralRealtimeConfig(PreTrainedConfig):
         self.hidden_size = text_config.hidden_size
         self.audio_token_id = audio_token_id
         self.projector_hidden_act = projector_hidden_act
-
-        self.audio_length_per_tok = 8
+        self.audio_length_per_tok = audio_length_per_tok
+        self.num_delay_tokens = num_delay_tokens
 
         super().__init__(**kwargs)
 
