@@ -448,17 +448,16 @@ class DPTViTEncoder(nn.Module):
         self.layer = nn.ModuleList([DPTViTLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states: torch.Tensor, output_hidden_states: bool = False) -> BaseModelOutput:
-        all_hidden_states = [hidden_states] if output_hidden_states else None
-        for i, layer_module in enumerate(self.layer):
+    def forward(
+        self, hidden_states: torch.Tensor, output_hidden_states: bool = False, **kwargs: Unpack[TransformersKwargs]
+    ) -> BaseModelOutput:
+        all_hidden_states = (hidden_states,) if output_hidden_states else None
+        for layer_module in self.layer:
             hidden_states = layer_module(hidden_states)
-            if all_hidden_states:
-                all_hidden_states.append(hidden_states)
+            if all_hidden_states is not None:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=tuple(all_hidden_states) if all_hidden_states else None,
-        )
+        return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=all_hidden_states)
 
 
 class DPTReassembleStage(nn.Module):
@@ -728,6 +727,7 @@ class DPTPreTrainedModel(PreTrainedModel):
     _supports_flex_attn = True
     _supports_attention_backend = True
     _can_record_outputs = {
+        "hidden_states": DPTViTLayer,
         "attentions": DPTSelfAttention,
     }
 
@@ -770,22 +770,17 @@ class DPTModel(DPTPreTrainedModel):
             return self.embeddings.patch_embeddings
 
     @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPoolingAndIntermediateActivations:
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         embedding_output: BaseModelOutputWithIntermediateActivations = self.embeddings(pixel_values)
         embedding_last_hidden_states = embedding_output.last_hidden_states
 
-        encoder_outputs: BaseModelOutput = self.encoder(
-            embedding_last_hidden_states, output_hidden_states=output_hidden_states
-        )
+        encoder_outputs: BaseModelOutput = self.encoder(embedding_last_hidden_states, **kwargs)
         sequence_output = encoder_outputs.last_hidden_state
 
         sequence_output = self.layernorm(sequence_output)
@@ -937,14 +932,14 @@ class DPTForDepthEstimation(DPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         labels: torch.LongTensor | None = None,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> DepthEstimatorOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
@@ -984,14 +979,13 @@ class DPTForDepthEstimation(DPTPreTrainedModel):
         >>> depth = depth.detach().cpu().numpy()
         >>> depth = Image.fromarray(depth.astype("uint8"))
         ```"""
-
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         loss = None
         if labels is not None:
             raise NotImplementedError("Training is not implemented yet")
 
+        user_requested_hidden_states = kwargs.get("output_hidden_states") or getattr(
+            self.config, "output_hidden_states", False
+        )
         kwargs["output_hidden_states"] = True
         if self.backbone is not None:
             outputs = self.backbone.forward_with_filtered_kwargs(pixel_values, **kwargs)
@@ -1027,7 +1021,7 @@ class DPTForDepthEstimation(DPTPreTrainedModel):
         return DepthEstimatorOutput(
             loss=loss,
             predicted_depth=predicted_depth,
-            hidden_states=outputs.hidden_states if output_hidden_states else None,
+            hidden_states=outputs.hidden_states if user_requested_hidden_states else None,
             attentions=outputs.attentions,
         )
 
@@ -1089,14 +1083,14 @@ class DPTForSemanticSegmentation(DPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> SemanticSegmenterOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
@@ -1122,12 +1116,12 @@ class DPTForSemanticSegmentation(DPTPreTrainedModel):
         >>> outputs = model(**inputs)
         >>> logits = outputs.logits
         ```"""
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         if labels is not None and self.config.num_labels == 1:
             raise ValueError("The number of labels should be greater than one")
 
+        user_requested_hidden_states = kwargs.get("output_hidden_states") or getattr(
+            self.config, "output_hidden_states", False
+        )
         kwargs["output_hidden_states"] = True
         outputs: BaseModelOutputWithPoolingAndIntermediateActivations = self.dpt(pixel_values, **kwargs)
         hidden_states = outputs.hidden_states
@@ -1172,7 +1166,7 @@ class DPTForSemanticSegmentation(DPTPreTrainedModel):
         return SemanticSegmenterOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.hidden_states if output_hidden_states else None,
+            hidden_states=outputs.hidden_states if user_requested_hidden_states else None,
             attentions=outputs.attentions,
         )
 

@@ -32,12 +32,14 @@ from ...modeling_outputs import (
     TokenClassifierOutput,
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ...processing_utils import Unpack
 from ...utils import (
+    TransformersKwargs,
     auto_docstring,
     can_return_tuple,
     logging,
 )
-from ...utils.generic import is_flash_attention_requested
+from ...utils.generic import check_model_inputs, is_flash_attention_requested
 from .configuration_gpt_bigcode import GPTBigCodeConfig
 
 
@@ -348,6 +350,10 @@ class GPTBigCodePreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn = True
     _supports_sdpa = True
+    _can_record_outputs = {
+        "hidden_states": GPTBigCodeBlock,
+        "attentions": GPTBigCodeAttention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -398,6 +404,7 @@ class GPTBigCodeModel(GPTBigCodePreTrainedModel):
     def set_input_embeddings(self, new_embeddings):
         self.wte = new_embeddings
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -411,11 +418,8 @@ class GPTBigCodeModel(GPTBigCodePreTrainedModel):
         encoder_hidden_states: torch.Tensor | None = None,
         encoder_attention_mask: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions:
         r"""
         input_ids (`torch.Tensor` of shape `(batch_size, input_ids_length)`):
@@ -431,12 +435,9 @@ class GPTBigCodeModel(GPTBigCodePreTrainedModel):
 
             [What are input IDs?](../glossary#input-ids)
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_attentions = kwargs.get("output_attentions")
+        output_hidden_states = kwargs.get("output_hidden_states")
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -567,6 +568,8 @@ class GPTBigCodeForCausalLM(GPTBigCodePreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -580,12 +583,9 @@ class GPTBigCodeForCausalLM(GPTBigCodePreTrainedModel, GenerationMixin):
         encoder_attention_mask: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.Tensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | CausalLMOutputWithCrossAttentions:
         r"""
         input_ids (`torch.Tensor` of shape `(batch_size, input_ids_length)`):
@@ -605,9 +605,7 @@ class GPTBigCodeForCausalLM(GPTBigCodePreTrainedModel, GenerationMixin):
             `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
             are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        transformer_outputs = self.transformer(
+        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -617,10 +615,8 @@ class GPTBigCodeForCausalLM(GPTBigCodePreTrainedModel, GenerationMixin):
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = transformer_outputs[0]
@@ -631,10 +627,6 @@ class GPTBigCodeForCausalLM(GPTBigCodePreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-        if not return_dict:
-            output = (logits,) + transformer_outputs[1:]
-            return ((loss,) + output) if loss is not None else output
 
         return CausalLMOutputWithCrossAttentions(
             loss=loss,
@@ -670,6 +662,8 @@ class GPTBigCodeForSequenceClassification(GPTBigCodePreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -681,10 +675,7 @@ class GPTBigCodeForSequenceClassification(GPTBigCodePreTrainedModel):
         inputs_embeds: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | SequenceClassifierOutputWithPast:
         r"""
         input_ids (`torch.Tensor` of shape `(batch_size, input_ids_length)`):
@@ -704,9 +695,7 @@ class GPTBigCodeForSequenceClassification(GPTBigCodePreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        transformer_outputs = self.transformer(
+        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -714,9 +703,6 @@ class GPTBigCodeForSequenceClassification(GPTBigCodePreTrainedModel):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             **kwargs,
         )
         hidden_states = transformer_outputs[0]
@@ -769,9 +755,6 @@ class GPTBigCodeForSequenceClassification(GPTBigCodePreTrainedModel):
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
-        if not return_dict:
-            output = (pooled_logits,) + transformer_outputs[1:]
-            return ((loss,) + output) if loss is not None else output
 
         return SequenceClassifierOutputWithPast(
             loss=loss,
@@ -801,6 +784,8 @@ class GPTBigCodeForTokenClassification(GPTBigCodePreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -812,10 +797,7 @@ class GPTBigCodeForTokenClassification(GPTBigCodePreTrainedModel):
         inputs_embeds: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | TokenClassifierOutput:
         r"""
         input_ids (`torch.Tensor` of shape `(batch_size, input_ids_length)`):
@@ -835,9 +817,7 @@ class GPTBigCodeForTokenClassification(GPTBigCodePreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        transformer_outputs = self.transformer(
+        transformer_outputs: BaseModelOutputWithPastAndCrossAttentions = self.transformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -845,9 +825,7 @@ class GPTBigCodeForTokenClassification(GPTBigCodePreTrainedModel):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            **kwargs,
         )
 
         hidden_states = transformer_outputs[0]
@@ -858,10 +836,6 @@ class GPTBigCodeForTokenClassification(GPTBigCodePreTrainedModel):
         if labels is not None:
             loss_fct = CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1).to(logits.device))
-
-        if not return_dict:
-            output = (logits,) + transformer_outputs[2:]
-            return ((loss,) + output) if loss is not None else output
 
         return TokenClassifierOutput(
             loss=loss,

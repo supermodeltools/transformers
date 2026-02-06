@@ -706,7 +706,6 @@ class AltCLIPPreTrainedModel(PreTrainedModel):
     base_model_prefix = "altclip"
     input_modalities = ("image", "text")
     supports_gradient_checkpointing = True
-    _can_record_outputs = {}
     _no_split_module = []
 
     @torch.no_grad()
@@ -770,6 +769,8 @@ class AltCLIPVisionTransformer(nn.Module):
         self.encoder = AltCLIPEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
+    @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -817,6 +818,7 @@ class AltCLIPVisionModel(AltCLIPPreTrainedModel):
         return self.vision_model.embeddings.patch_embedding
 
     @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -893,6 +895,7 @@ class AltRobertaModel(AltCLIPPreTrainedModel):
         self.embeddings.word_embeddings = value
 
     @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     # Copied from transformers.models.clap.modeling_clap.ClapTextModel.forward
     def forward(
@@ -977,6 +980,7 @@ class AltCLIPTextModel(AltCLIPPreTrainedModel):
         return super().resize_token_embeddings(new_num_tokens)
 
     @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -1107,6 +1111,7 @@ class AltCLIPModel(AltCLIPPreTrainedModel):
         return text_outputs
 
     @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def get_image_features(
         self,
@@ -1142,7 +1147,7 @@ class AltCLIPModel(AltCLIPPreTrainedModel):
 
         return vision_outputs
 
-    @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,

@@ -491,22 +491,13 @@ class AlignVisionEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        output_hidden_states: bool | None = False,
-        return_dict: bool | None = True,
-    ) -> BaseModelOutputWithPoolingAndNoAttention:
-        all_hidden_states = (hidden_states,) if output_hidden_states else None
-
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithNoAttention:
         for block in self.blocks:
             hidden_states = block(hidden_states)
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
 
         return BaseModelOutputWithNoAttention(
             last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
         )
 
 
@@ -621,7 +612,7 @@ class AlignTextSelfAttention(nn.Module):
         attention_mask: torch.FloatTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor]:
-        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        output_attentions = kwargs.get("output_attentions")
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.attention_head_size)
 
@@ -954,6 +945,9 @@ class AlignVisionModel(AlignPreTrainedModel):
     supports_gradient_checkpointing = False
     _input_embed_layer = "convolution"
     _no_split_modules = ["AlignVisionBlock"]
+    _can_record_outputs = {
+        "hidden_states": AlignVisionBlock,
+    }
 
     def __init__(self, config: AlignVisionConfig):
         super().__init__(config)
@@ -972,15 +966,13 @@ class AlignVisionModel(AlignPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @can_return_tuple
+    @check_model_inputs(tie_last_hidden_states=False)
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.FloatTensor | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> tuple | BaseModelOutputWithPoolingAndNoAttention:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPoolingAndNoAttention:
         r"""
         Examples:
 
@@ -1003,30 +995,21 @@ class AlignVisionModel(AlignPreTrainedModel):
         >>> last_hidden_state = outputs.last_hidden_state
         >>> pooled_output = outputs.pooler_output  # pooled CLS states
         ```"""
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
 
         embedding_output = self.embeddings(pixel_values)
         encoder_outputs = self.encoder(
             embedding_output,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
+            **kwargs,
         )
-        # Apply pooling
         last_hidden_state = encoder_outputs[0]
         pooled_output = self.pooler(last_hidden_state)
-        # Reshape (batch_size, projection_dim, 1 , 1) -> (batch_size, projection_dim)
         pooled_output = pooled_output.reshape(pooled_output.shape[:2])
 
         return BaseModelOutputWithPoolingAndNoAttention(
             last_hidden_state=last_hidden_state,
             pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
         )
 
 
@@ -1095,7 +1078,6 @@ class AlignModel(AlignPreTrainedModel):
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
-            return_dict=True,
             **kwargs,
         )
         last_hidden_state = text_outputs[0][:, 0, :]
@@ -1139,11 +1121,8 @@ class AlignModel(AlignPreTrainedModel):
         position_ids: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
         return_loss: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> tuple | AlignOutput:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> AlignOutput:
         r"""
         return_loss (`bool`, *optional*):
             Whether or not to return the contrastive loss.
@@ -1170,17 +1149,9 @@ class AlignModel(AlignPreTrainedModel):
         >>> logits_per_image = outputs.logits_per_image  # this is the image-text similarity score
         >>> probs = logits_per_image.softmax(dim=1)  # we can take the softmax to get the label probabilities
         ```"""
-        # Use ALIGN model's config for some fields (if specified) instead of those of vision & text components.
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         vision_outputs = self.vision_model(
             pixel_values=pixel_values,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
+            **kwargs,
         )
 
         text_outputs = self.text_model(
@@ -1189,9 +1160,7 @@ class AlignModel(AlignPreTrainedModel):
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
+            **kwargs,
         )
 
         image_embeds = vision_outputs[1]

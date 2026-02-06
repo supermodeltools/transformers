@@ -173,7 +173,7 @@ class LayoutLMSelfAttention(nn.Module):
         attention_mask: torch.FloatTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor]:
-        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        output_attentions = kwargs.get("output_attentions")
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.attention_head_size)
 

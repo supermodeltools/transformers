@@ -402,17 +402,16 @@ class Dinov2WithRegistersEncoder(nn.Module):
         self.layer = nn.ModuleList([Dinov2WithRegistersLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states: torch.Tensor, output_hidden_states: bool = False) -> BaseModelOutput:
-        all_hidden_states = [hidden_states] if output_hidden_states else None
-        for i, layer_module in enumerate(self.layer):
+    def forward(
+        self, hidden_states: torch.Tensor, output_hidden_states: bool = False, **kwargs: Unpack[TransformersKwargs]
+    ) -> BaseModelOutput:
+        all_hidden_states = (hidden_states,) if output_hidden_states else None
+        for layer_module in self.layer:
             hidden_states = layer_module(hidden_states)
-            if all_hidden_states:
-                all_hidden_states.append(hidden_states)
+            if all_hidden_states is not None:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=tuple(all_hidden_states) if all_hidden_states else None,
-        )
+        return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=all_hidden_states)
 
 
 @auto_docstring
@@ -428,6 +427,7 @@ class Dinov2WithRegistersPreTrainedModel(PreTrainedModel):
     _supports_flex_attn = True
     _supports_attention_backend = True
     _can_record_outputs = {
+        "hidden_states": Dinov2WithRegistersLayer,
         "attentions": Dinov2WithRegistersSelfAttention,
     }
 
@@ -468,28 +468,25 @@ class Dinov2WithRegistersModel(Dinov2WithRegistersPreTrainedModel):
         return self.embeddings.patch_embeddings
 
     @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.Tensor | None = None,
         bool_masked_pos: torch.Tensor | None = None,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPooling:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, sequence_length)`):
             Boolean masked positions. Indicates which patches are masked (1) and which aren't (0). Only relevant for
             pre-training.
         """
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
 
         embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
 
-        encoder_outputs: BaseModelOutput = self.encoder(embedding_output, output_hidden_states=output_hidden_states)
+        encoder_outputs: BaseModelOutput = self.encoder(embedding_output, **kwargs)
         sequence_output = encoder_outputs.last_hidden_state
         sequence_output = self.layernorm(sequence_output)
         pooled_output = sequence_output[:, 0, :]
@@ -581,13 +578,13 @@ class Dinov2WithRegistersBackbone(BackboneMixin, Dinov2WithRegistersPreTrainedMo
     def get_input_embeddings(self) -> Dinov2WithRegistersPatchEmbeddings:
         return self.embeddings.patch_embeddings
 
-    @check_model_inputs
+    @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.Tensor,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> BackboneOutput:
         r"""
         Examples:
@@ -615,11 +612,9 @@ class Dinov2WithRegistersBackbone(BackboneMixin, Dinov2WithRegistersPreTrainedMo
         >>> list(feature_maps[-1].shape)
         [1, 768, 16, 16]
         ```"""
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         embedding_output = self.embeddings(pixel_values)
-        output: BaseModelOutput = self.encoder(embedding_output, output_hidden_states=True)
+        kwargs["output_hidden_states"] = True
+        output: BaseModelOutput = self.encoder(embedding_output, **kwargs)
         hidden_states = output.hidden_states
 
         feature_maps = []
@@ -637,10 +632,7 @@ class Dinov2WithRegistersBackbone(BackboneMixin, Dinov2WithRegistersPreTrainedMo
                     hidden_state = hidden_state.permute(0, 3, 1, 2).contiguous()
                 feature_maps.append(hidden_state)
 
-        return BackboneOutput(
-            feature_maps=tuple(feature_maps),
-            hidden_states=hidden_states if output_hidden_states else None,
-        )
+        return BackboneOutput(feature_maps=tuple(feature_maps))
 
 
 __all__ = [

@@ -30,7 +30,8 @@ from ...backbone_utils import BackboneConfigMixin
 from ...configuration_utils import PreTrainedConfig
 from ...modeling_outputs import BackboneOutput, BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
 from ...processing_utils import Unpack
-from ...utils import TransformersKwargs, logging, torch_int
+from ...utils import TransformersKwargs, auto_docstring, logging, torch_int
+from ...utils.generic import can_return_tuple, check_model_inputs
 
 
 logger = logging.get_logger(__name__)
@@ -350,11 +351,13 @@ class Dinov2WithRegistersBackbone(Dinov2Backbone):
     def get_input_embeddings(self) -> Dinov2WithRegistersPatchEmbeddings:
         return self.embeddings.patch_embeddings
 
+    @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
+    @auto_docstring
     def forward(
         self,
         pixel_values: torch.Tensor,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> BackboneOutput:
         r"""
         Examples:
@@ -382,11 +385,9 @@ class Dinov2WithRegistersBackbone(Dinov2Backbone):
         >>> list(feature_maps[-1].shape)
         [1, 768, 16, 16]
         ```"""
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-
         embedding_output = self.embeddings(pixel_values)
-        output: BaseModelOutput = self.encoder(embedding_output, output_hidden_states=True)
+        kwargs["output_hidden_states"] = True
+        output: BaseModelOutput = self.encoder(embedding_output, **kwargs)
         hidden_states = output.hidden_states
 
         feature_maps = []
@@ -404,10 +405,7 @@ class Dinov2WithRegistersBackbone(Dinov2Backbone):
                     hidden_state = hidden_state.permute(0, 3, 1, 2).contiguous()
                 feature_maps.append(hidden_state)
 
-        return BackboneOutput(
-            feature_maps=tuple(feature_maps),
-            hidden_states=hidden_states if output_hidden_states else None,
-        )
+        return BackboneOutput(feature_maps=tuple(feature_maps))
 
 
 __all__ = [
