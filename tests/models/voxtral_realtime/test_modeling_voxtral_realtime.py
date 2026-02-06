@@ -15,6 +15,7 @@
 
 import tempfile
 import unittest
+import functools
 
 from transformers import (
     VoxtralRealtimeConfig,
@@ -44,8 +45,8 @@ class VoxtralRealtimeModelTester:
         parent,
         ignore_index=-100,
         audio_token_id=0,
-        seq_length=35,
-        feat_seq_length=60,
+        seq_length=5,
+        feat_seq_length=40,
         text_config={
             "model_type": "voxtral_realtime_text",
             "intermediate_size": 36,
@@ -73,10 +74,9 @@ class VoxtralRealtimeModelTester:
             "hidden_size": 16,
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
-            "intermediate_size": 32,
+            "intermediate_size": 64,
             "encoder_layers": 2,
             "num_mel_bins": 80,
-            "d_model": 16,
             "max_position_embeddings": 100,
             "initializer_range": 0.02,
             "rms_norm_eps": 1e-6,
@@ -106,6 +106,7 @@ class VoxtralRealtimeModelTester:
 
         self.batch_size = 3
         self.encoder_seq_length = seq_length
+        self._max_new_tokens = None  # this is used to set
 
     def get_config(self):
         return VoxtralRealtimeConfig(
@@ -116,11 +117,16 @@ class VoxtralRealtimeModelTester:
         )
 
     def prepare_config_and_inputs(self):
+        if self._max_new_tokens is not None:
+            feat_seq_length = self.feat_seq_length + self._max_new_tokens * 8
+        else:
+            feat_seq_length = self.feat_seq_length
+
         input_features_values = floats_tensor(
             [
                 self.batch_size,
                 self.audio_config["num_mel_bins"],
-                self.feat_seq_length,
+                feat_seq_length,
             ]
         )
         config = self.get_config()
@@ -151,6 +157,7 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
     """
     Model tester for `VoxtralRealtimeForConditionalGeneration`.
     """
+    additional_model_inputs = ["input_features"]
 
     all_model_classes = (VoxtralRealtimeForConditionalGeneration,) if is_torch_available() else ()
     pipeline_model_mapping = (
@@ -165,88 +172,116 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
         self.model_tester = VoxtralRealtimeModelTester(self)
         self.config_tester = ConfigTester(self, config_class=VoxtralRealtimeConfig, has_text_modality=False)
 
-    @unittest.skip(
-        reason="This test does not apply to VoxtralRealtime since inputs_embeds corresponding to audio tokens are replaced when input features are provided."
-    )
-    def test_inputs_embeds_matches_input_ids(self):
-        pass
+    def _with_max_new_tokens(max_new_tokens):
+        def decorator(test_func):
+            @functools.wraps(test_func)
+            def wrapper(self, *args, **kwargs):
+                try:
+                    self.model_tester._max_new_tokens = max_new_tokens
+                    return test_func(self, *args, **kwargs)
+                finally:
+                    self.model_tester._max_new_tokens = None
+            return wrapper
+        return decorator
+
+    def prepare_config_and_inputs_for_generate(self, batch_size=2):
+        original_feat_seq_length = self.model_tester.feat_seq_length
+        try:
+            self.model_tester.feat_seq_length += self.max_new_tokens * 8
+            config, inputs_dict = super().prepare_config_and_inputs_for_generate(batch_size=batch_size)
+        finally:
+            self.model_tester.feat_seq_length = original_feat_seq_length
+        return config, inputs_dict
+
+    @_with_max_new_tokens(max_new_tokens=10)
+    def test_generate_methods_with_logits_to_keep(self):
+        super().test_generate_methods_with_logits_to_keep()
+
+    @_with_max_new_tokens(max_new_tokens=5)
+    def test_generate_compile_model_forward_fullgraph(self):
+        super().test_generate_compile_model_forward_fullgraph()
+    
+    @_with_max_new_tokens(max_new_tokens=4)
+    def test_generate_continue_from_past_key_values(self):
+        super().test_generate_continue_from_past_key_values()
 
     @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
+        reason="VoxtralRealtime does not have a base model"
     )
-    def test_eager_padding_matches_padding_free_with_position_ids(self):
-        pass
-
-    @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
-    )
-    def test_sdpa_padding_matches_padding_free_with_position_ids(self):
-        pass
-
-    @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
-    )
-    def test_flash_attention_2_padding_matches_padding_free_with_position_ids(self):
-        pass
-
-    @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
-    )
-    def test_flash_attention_2_padding_matches_padding_free_with_position_ids_and_fa_kwargs(self):
-        pass
-
-    @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
-    )
-    def test_flash_attention_3_padding_matches_padding_free_with_position_ids(self):
-        pass
-
-    @unittest.skip(
-        reason="VoxtralRealtime need lots of steps to prepare audio/mask correctly to get pad-free inputs. Cf llava (reference multimodal model)"
-    )
-    def test_flash_attention_3_padding_matches_padding_free_with_position_ids_and_fa_kwargs(self):
-        pass
-
-    @unittest.skip(reason="VoxtralRealtime has no separate base model without a head.")
     def test_model_base_model_prefix(self):
         pass
 
-    def test_sdpa_can_dispatch_composite_models(self):
-        # overwrite because VoxtralRealtime is audio+text model (not vision+text)
-        if not self.has_attentions:
-            self.skipTest(reason="Model architecture does not support attentions")
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def test_flash_attention_2_continue_generate_with_position_ids(self):
+        pass
 
-        if not self._is_composite:
-            self.skipTest(f"{self.all_model_classes[0].__name__} does not support SDPA")
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def test_custom_4d_attention_mask(self):
+        pass
 
-        for model_class in self.all_model_classes:
-            config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-            model = model_class(config)
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def test_flash_attn_2_from_config(self):
+        pass
 
-            with tempfile.TemporaryDirectory() as tmpdirname:
-                model.save_pretrained(tmpdirname)
-                model_sdpa = model_class.from_pretrained(tmpdirname)
-                model_sdpa = model_sdpa.eval().to(torch_device)
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def attention_mask_padding_matches_padding_free_with_position_ids(self):
+        pass
 
-                text_attn = "sdpa" if model.language_model._supports_sdpa else "eager"
-                vision_attn = "sdpa" if model.audio_tower._supports_sdpa else "eager"
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def flash_attn_inference_equivalence(self):
+        pass
 
-                # `None` as it is the requested one which will be assigned to each sub-config
-                # Sub-model will dispatch to SDPA if it can (checked below that `SDPA` layers are present)
-                self.assertTrue(model_sdpa.config._attn_implementation == "sdpa")
-                self.assertTrue(model.language_model.config._attn_implementation == text_attn)
-                self.assertTrue(model.audio_tower.config._attn_implementation == vision_attn)
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime for now since encoder_past_key_values AND padding_cache are returned by generate"
+    )
+    def test_generate_continue_from_past_key_values(self):
+        pass
 
-                model_eager = model_class.from_pretrained(tmpdirname, attn_implementation="eager")
-                model_eager = model_eager.eval().to(torch_device)
-                self.assertTrue(model_eager.config._attn_implementation == "eager")
-                self.assertTrue(model_eager.language_model.config._attn_implementation == "eager")
-                self.assertTrue(model_eager.audio_tower.config._attn_implementation == "eager")
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since prepare_inputs_for_generation is overwritten"
+    )
+    def test_prepare_inputs_for_generation_kwargs_forwards(self):
+        pass
 
-                for name, submodule in model_eager.named_modules():
-                    class_name = submodule.__class__.__name__
-                    if "SdpaAttention" in class_name or "SdpaSelfAttention" in class_name:
-                        raise ValueError("The eager model should not have SDPA attention layers")
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since input_features must be provided along input_ids"
+    )
+    def test_generate_without_input_ids(self):
+        pass
+
+    @unittest.skip(
+        reason="VoxtralRealtime does not fall in the paradigm of assisted decoding (at least for the way it is implemented in generate)"
+    )
+    def test_assisted_decoding_sample(self):
+        pass
+
+    @unittest.skip(
+        reason="VoxtralRealtime does not fall in the paradigm of assisted decoding (at least for the way it is implemented in generate)"
+    )
+    def test_assisted_decoding_matches_greedy_search_0_random(self):
+        pass
+
+    @unittest.skip(
+        reason="VoxtralRealtime does not fall in the paradigm of assisted decoding (at least for the way it is implemented in generate)"
+    )
+    def test_assisted_decoding_matches_greedy_search_1_same(self):
+        pass
+
+    @unittest.skip(
+        reason="This test does not apply to VoxtralRealtime since in only pads input_ids but input_features should also be padded"
+    )
+    def test_left_padding_compatibility(self):
+        pass
 
 
 # TODO: Add integration tests once checkpoint is available

@@ -1061,6 +1061,8 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
             **kwargs,
         )
         audio_hidden_states = audio_outputs.last_hidden_state
+
+        # TODO: it is never enforced that intermediate_size * 4
         audio_hidden_states = audio_hidden_states.reshape(
             audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size
         )
@@ -1121,6 +1123,8 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
         >>> processor.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
         ["This audio is a humorous conversation between two friends, likely in English, where one of them is trying to figure out what the other's tattoo says."]
         ```"""
+        # TODO: @eustlb: enforce the inputs
+
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
@@ -1266,6 +1270,7 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
 
         # TODO: maybe add a warning here in case user's trying to set max_new_tokens
         generation_config.max_length = num_audio_tokens
+
         return generation_config, model_kwargs
 
     def _prepare_generated_length(
