@@ -435,8 +435,9 @@ class GPTBigCodeModel(GPTBigCodePreTrainedModel):
 
             [What are input IDs?](../glossary#input-ids)
         """
-        output_attentions = kwargs.get("output_attentions")
-        output_hidden_states = kwargs.get("output_hidden_states")
+        # pop recordable flags so we don't pass them twice into blocks
+        output_attentions = kwargs.pop("output_attentions", self.config.output_attentions)
+        output_hidden_states = kwargs.pop("output_hidden_states", self.config.output_hidden_states)
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
