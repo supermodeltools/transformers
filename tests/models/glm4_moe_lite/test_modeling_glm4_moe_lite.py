@@ -62,7 +62,6 @@ class Glm4MoeModelTest(CausalLMModelTest, unittest.TestCase):
     model_tester_class = Glm4MoeLiteModelTester
     test_all_params_have_gradient = False
     model_split_percents = [0.5, 0.7, 0.8]
-    tensor_parallel_atol = 1e-4  # MoE + LoRA attention causes larger numerical differences
 
     def _check_past_key_values_for_generate(self, batch_size, past_key_values, seq_length, config):
         """Needs to be overridden as GLM-4.7-Flash has special MLA cache format (though we don't really use the MLA)"""

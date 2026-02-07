@@ -306,6 +306,14 @@ class Glm4MoeLiteAttention(nn.Module):
 
         k_rot = k_rot.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
 
+        # In TP mode, k_rot bypasses kv_b_proj (colwise) so its gradient from local
+        # heads is only a partial sum. all_reduce_backward fixes this in backward.
+        device_mesh = getattr(self.kv_b_proj, "_hf_device_mesh", None)
+        if device_mesh is not None:
+            from ...integrations.tensor_parallel import all_reduce_backward
+
+            k_rot = all_reduce_backward(k_rot, device_mesh)
+
         cos, sin = position_embeddings
         if self.config.rope_interleave:  # support using interleaved weights for efficiency
             q_rot, k_rot = apply_rotary_pos_emb_interleave(q_rot, k_rot, cos, sin)

@@ -1283,6 +1283,7 @@ def add_tensor_parallel_hooks_to_module(
             )
 
         module._hf_tp_plan = current_module_plan
+        module._hf_device_mesh = device_mesh
         module.__repr__ = lambda: f"{module.__repr__()}\nTP Plan: {current_module_plan}"
 
 
