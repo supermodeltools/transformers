@@ -47,6 +47,13 @@ class Exaone4ModelTester(CausalLMModelTester):
     if is_torch_available():
         base_model_class = Exaone4Model
 
+    def __init__(self, parent):
+        super().__init__(parent=parent)
+        # NOTE(3outeille): must be 0.0 for TP backward tests. In train mode, non-zero dropout causes
+        # different RNG states between the non-TP and TP model forward passes (they run sequentially),
+        # leading to different dropout masks and mismatched losses.
+        self.attention_probs_dropout_prob = 0.0
+
 
 @require_torch
 class Exaone4ModelTest(CausalLMModelTest, unittest.TestCase):
