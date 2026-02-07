@@ -2029,19 +2029,27 @@ class ModelTesterMixin:
                 inputs_dict,
             ) = self.model_tester.prepare_config_and_inputs_for_common()
             for model_class in self.all_model_classes:
-                model = model_class(copy.deepcopy(original_config))
-                model.to(torch_device)
-                model.eval()
+                # Create BOTH models with same random weights before any forward passes
+                # Model 1: no chunking
+                config_no_chunk = copy.deepcopy(original_config)
+                model_no_chunk = model_class(config_no_chunk)
+                model_no_chunk.to(torch_device)
+                model_no_chunk.eval()
 
-                hidden_states_no_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
+                # Model 2: with chunking (must use same random seed as model 1)
+                config_with_chunk = copy.deepcopy(original_config)
+                config_with_chunk.chunk_size_feed_forward = 1
+                model_with_chunk = model_class(config_with_chunk)
+                model_with_chunk.to(torch_device)
+                model_with_chunk.eval()
 
-                set_seed(42)
-                original_config.chunk_size_feed_forward = 1
-                model = model_class(copy.deepcopy(original_config))
-                model.to(torch_device)
-                model.eval()
+                # Copy weights from model 1 to model 2 to ensure they're identical
+                model_with_chunk.load_state_dict(model_no_chunk.state_dict())
 
-                hidden_states_with_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
+                # Now run forward passes and compare
+                hidden_states_no_chunk = model_no_chunk(**self._prepare_for_class(inputs_dict, model_class))[0]
+                hidden_states_with_chunk = model_with_chunk(**self._prepare_for_class(inputs_dict, model_class))[0]
+
                 torch.testing.assert_close(hidden_states_no_chunk, hidden_states_with_chunk, rtol=1e-3, atol=1e-3)
         finally:
             # Restore original deterministic setting
