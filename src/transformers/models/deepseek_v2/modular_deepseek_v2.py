@@ -140,12 +140,18 @@ class DeepseekV2Config(LlamaConfig):
 
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise",
-        "layers.*.self_attn.q_a_proj": "colwise",
         "layers.*.self_attn.q_b_proj": "colwise",
         "layers.*.self_attn.kv_b_proj": "colwise",
         "layers.*.self_attn.o_proj": "rowwise",
         "layers.*.mlp.experts.gate_up_proj": "packed_colwise",
         "layers.*.mlp.experts.down_proj": "rowwise",
+        "layers.*.mlp.experts": "moe_tp_experts",
+        "layers.*.mlp.shared_experts.gate_proj": "colwise",
+        "layers.*.mlp.shared_experts.up_proj": "colwise",
+        "layers.*.mlp.shared_experts.down_proj": "rowwise",
+        "layers.*.mlp.gate_proj": "colwise",
+        "layers.*.mlp.up_proj": "colwise",
+        "layers.*.mlp.down_proj": "rowwise",
     }
 
     model_type = "deepseek_v2"
@@ -384,6 +390,15 @@ class DeepseekV2Attention(nn.Module):
         k_nope, value_states = torch.split(k_nope, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         k_pe = k_pe.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
+
+        # In TP mode, k_pe bypasses kv_b_proj (colwise) so its gradient from local
+        # heads is only a partial sum. all_reduce_backward fixes this in backward.
+        device_mesh = getattr(self.kv_b_proj, "_hf_device_mesh", None)
+        if device_mesh is not None:
+            from ...integrations.tensor_parallel import all_reduce_backward
+
+            k_pe = all_reduce_backward(k_pe, device_mesh)
+
         q_pe, k_pe = apply_rotary_emb(q_pe, k_pe, position_embeddings.to(q_pe.device))
 
         k_pe = k_pe.expand(*k_nope.shape[:-1], -1)
