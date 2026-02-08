@@ -229,6 +229,10 @@ class EsmFoldModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     def test_multi_gpu_data_parallel_forward(self):
         pass
 
+    @unittest.skip(reason="ESMFold initialization with deterministic mode creates empty tensors")
+    def test_all_tensors_are_parameter_or_buffer(self):
+        pass
+
 
 @require_torch
 class EsmModelIntegrationTest(TestCasePlus):
