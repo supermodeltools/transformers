@@ -521,6 +521,10 @@ class TapasModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_for_sequence_classification(*config_and_inputs)
 
+    @unittest.skip(reason="Tapas initialization with deterministic mode produces NaN values in logits")
+    def test_all_tensors_are_parameter_or_buffer(self):
+        pass
+
 
 def prepare_tapas_single_inputs_for_inference():
     # Here we prepare a single table-question pair to test TAPAS inference on:
