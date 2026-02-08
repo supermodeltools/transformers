@@ -702,6 +702,8 @@ class GenerationTesterMixin:
             }
             logits_processor_kwargs = self._get_logits_processor_kwargs(config=model.config)
 
+            # Reset seed before each generate call to ensure identical RNG state
+            set_seed(42)
             output_greedy = model.generate(**generation_kwargs, **inputs_dict, **logits_processor_kwargs)
 
             # test with the same assistant model or randomly init one
@@ -715,6 +717,9 @@ class GenerationTesterMixin:
             assistant_model.generation_config.num_assistant_tokens = 2  # see b)
             assistant_model.generation_config.num_assistant_tokens_schedule = "constant"  # see b)
             generation_kwargs.update({"assistant_model": assistant_model})
+
+            # Reset seed again before assisted generate to match greedy RNG state
+            set_seed(42)
             output_assisted = model.generate(**generation_kwargs, **inputs_dict, **logits_processor_kwargs)
 
             # `gpt_oss` seems to have larger differences on CPU every other generated tokens, sth. like
