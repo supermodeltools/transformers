@@ -18,7 +18,7 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from transformers.testing_utils import require_av, require_torch, require_torchvision, require_vision
+from transformers.testing_utils import is_flaky, require_av, require_torch, require_torchvision, require_vision
 from transformers.utils import is_torch_available, is_vision_available
 
 from ...test_processing_common import ProcessorTesterMixin
@@ -172,6 +172,7 @@ class VideoLlama3ProcessorTest(ProcessorTesterMixin, unittest.TestCase):
             self.assertIsInstance(out_dict[k], return_tensor_to_type[return_tensors])
 
     @require_av
+    @is_flaky(description="Test downloads 10MB video from network and extracts frames - can fail with PIL.UnidentifiedImageError due to network issues")
     def test_apply_chat_template_video_frame_sampling(self):
         processor = self.get_processor()
         if processor.chat_template is None:
