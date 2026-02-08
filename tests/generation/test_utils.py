@@ -710,6 +710,8 @@ class GenerationTesterMixin:
             # in the first case all candidate tokens are accepted, in the second none is accepted
             # case when some are accepted and some not is hard to reproduce, so let's hope this catches most errors :)
             if assistant_type == "random":
+                # Reset seed before creating assistant model to ensure consistent random initialization
+                set_seed(43, deterministic=True)
                 assistant_model = model_class(config).to(torch_device).eval()
             else:
                 assistant_model = model
