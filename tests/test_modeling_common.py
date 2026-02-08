@@ -2017,6 +2017,10 @@ class ModelTesterMixin:
         return self.model_tester.prepare_config_and_inputs_for_common()
 
     def test_feed_forward_chunking(self):
+        # Check if test is disabled for this model
+        if not getattr(self, "test_feed_forward_chunking", True):
+            self.skipTest(reason="test_feed_forward_chunking is set to `False`")
+
         # Disable deterministic algorithms for this test as it compares different computation paths
         # (chunked vs non-chunked) which legitimately produce slightly different numerical results
         # when deterministic mode forces different algorithm implementations
