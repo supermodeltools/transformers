@@ -169,8 +169,6 @@ class MistralConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin):
         self.eos_token_id = eos_token_id
         self.rope_parameters = rope_parameters
 
-        self.use_ada_rms_norm = True
-
         super().__init__(**kwargs)
 
 
