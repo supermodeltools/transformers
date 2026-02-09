@@ -19,11 +19,8 @@ from transformers import set_seed
 from transformers.conversion_mapping import _MODEL_TO_CONVERSION_PATTERN
 from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
 from transformers.testing_utils import (
-    backend_device_count,
     is_tensor_parallel_test,
     is_torch_available,
-    require_torch_multi_accelerator,
-    torch_device,
 )
 from transformers.utils import is_torch_greater_or_equal
 
@@ -388,16 +385,10 @@ class TensorParallelTesterMixin(ABC):
         # if hasattr(config, "vision_config") and config.vision_config is not None:
         #     self.skipTest("VLM models are not yet supported in TP tests")
 
-        if backend_device_count(torch_device) < self.tensor_parallel_size:
-            self.skipTest(
-                f"Need at least {self.tensor_parallel_size} devices, have {backend_device_count(torch_device)}"
-            )
-
     # ============================================================
     # Public test methods - PATH A: Direct Load (Dense models)
     # ============================================================
     @is_tensor_parallel_test
-    @require_torch_multi_accelerator
     def test_tp_forward_direct(self):
         """Test TP forward pass with direct load path (no conversion mapping).
 
@@ -420,7 +411,6 @@ class TensorParallelTesterMixin(ABC):
             _init_distributed(tp=self.tensor_parallel_size)(_test_tp_forward_impl)(tmp_dir, model_class, atol, rtol)
 
     @is_tensor_parallel_test
-    @require_torch_multi_accelerator
     def test_tp_backward_direct(self):
         """Test TP backward pass with direct load path (no conversion mapping).
 
@@ -443,7 +433,6 @@ class TensorParallelTesterMixin(ABC):
             _init_distributed(tp=self.tensor_parallel_size)(_test_tp_backward_impl)(tmp_dir, model_class, atol, rtol)
 
     @is_tensor_parallel_test
-    @require_torch_multi_accelerator
     def test_tp_generation_direct(self):
         """Test TP generation with direct load path (no conversion mapping).
 
@@ -470,7 +459,6 @@ class TensorParallelTesterMixin(ABC):
     # Public test methods - PATH B: Conversion + Load (MoE models)
     # ============================================================
     @is_tensor_parallel_test
-    @require_torch_multi_accelerator
     def test_tp_generation_with_conversion(self):
         """Test TP generation with conversion mapping path (MoE weight fusion).
         Loading path: original checkpoint → conversion mapping → TP sharding → model → generate
