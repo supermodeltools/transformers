@@ -14,6 +14,7 @@
 """Testing suite for the PyTorch VoxtralRealtime model."""
 
 import functools
+from tkinter import X
 import unittest
 
 from transformers import (
@@ -21,7 +22,9 @@ from transformers import (
     VoxtralRealtimeConfig,
     VoxtralRealtimeForConditionalGeneration,
     is_torch_available,
+    is_datasets_available,
 )
+from transformers.audio_utils import load_audio
 from transformers.testing_utils import (
     cleanup,
     require_torch,
@@ -34,6 +37,9 @@ from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
 
+if is_datasets_available():
+    import datasets
+    from datasets import Audio, load_dataset
 
 if is_torch_available():
     import torch
@@ -288,14 +294,80 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
 class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.checkpoint_name = "/raid/eustache/Voxtral-Mini-4B-Realtime-2602-hf"
-        self.dtype = torch.bfloat16
         self.processor = AutoProcessor.from_pretrained(self.checkpoint_name)
 
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
 
     @slow
-    def test_realtime_inference(self):
-        """Test streaming inference with the realtime model."""
-        model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, dtype=self.dtype, device_map=torch_device)
+    def test_single_longform(self):
+        """
+        reproducer: https://gist.github.com/eustlb/980bade49311336509985f9a308e80af
+        """
+        model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
+        audio = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav", self.processor.feature_extractor.sampling_rate)
 
+        inputs = self.processor(audio, return_tensors="pt")
+        inputs.to(model.device, dtype=model.dtype)
+
+        outputs = model.generate(**inputs)
+        decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
+
+        EXPECTED_OUTPUT = [
+            " Come on! Dude, you got a tattoo. So do you, dude. No. Oh, dude, what does my tattoo say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude! What does mine say? Sweet! Idiot! Your tattoo says dude. Your tattoo says sweet. Got it?",
+        ]
+
+        self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
+    
+    @slow
+    def test_batched(self):
+        """
+        reproducer: https://gist.github.com/eustlb/980bade49311336509985f9a308e80af
+        """
+        model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
+
+        # Load dataset manually
+        ds = datasets.load_dataset(
+            "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
+        )
+        speech_samples = ds.sort("id")[:5]["audio"]
+        input_speech = [x["array"] for x in speech_samples]
+        
+        inputs = self.processor(input_speech, return_tensors="pt")
+        inputs.to(model.device, dtype=model.dtype)
+
+        outputs = model.generate(**inputs)
+        decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
+
+        EXPECTED_OUTPUT = [
+            " Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+            " nor is mr quilter's manner less interesting than his matter",
+            " He tells us that at this festive season of the year, with Christmas and roast beef looming before us, similes drawn from eating and its results occur most readily to the mind.",
+            " He has grave doubts whether Sir Frederick Leighton's work is really Greek after all, and can discover in it but little of rocky Ithaca.",
+            " Linnell's pictures are a sort of up-guards-and-atom paintings, and Mason's exquisite idylls are as national as a jingo poem. Mr. Burkett Foster's landscapes smile at one much in the same way that Mr. Carker used to flash his teeth. And Mr. John Collier gives his sitter a cheerful slap on the back before he says, like a shampooer in a Turkish bath, Next man!",
+        ]
+
+        self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
+
+    @slow
+    def test_batched_longform(self):
+        """
+        reproducer: https://gist.github.com/eustlb/980bade49311336509985f9a308e80af
+        """
+        model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
+
+        audio1 = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav", self.processor.feature_extractor.sampling_rate)
+        audio2 = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/obama.mp3", self.processor.feature_extractor.sampling_rate)
+
+        inputs = self.processor([audio1, audio2], return_tensors="pt")
+        inputs.to(model.device, dtype=model.dtype)
+
+        outputs = model.generate(**inputs)
+        decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
+
+        EXPECTED_OUTPUT = [
+            " Come on! Dude, you got a tattoo. So do you, dude. No. Oh, dude, what does my tattoo say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude, what does mine say? Sweet! What about mine? Dude! What does mine say? Sweet! Idiot! Your tattoo says dude. Your tattoo says sweet. Got it?",
+            " This week, I traveled to Chicago to deliver my final farewell address to the nation, following in the tradition of presidents before me. It was an opportunity to say thank you. Whether we've seen eye to eye or rarely agreed at all, my conversations with you, the American people, in living rooms and schools, at farms and on factory floors, at diners and on distant military outposts, All these conversations are what have kept me honest, kept me inspired, and kept me going. Every day, I learned from you. You made me a better president, and you made me a better man. Over the course of these eight years, I've seen the goodness, the resilience, and the hope of the American people. I've seen neighbors looking out for each other as we rescued our economy from the worst crisis of our lifetimes. I've hugged cancer survivors who finally know the security of affordable health care. I've seen communities like Joplin rebuild from disaster and cities like Boston show the world that no terrorist will ever break the American spirit. I've seen the hopeful faces of young graduates and our newest military officers. I've mourned with grieving families searching for answers. And I found grace in a Charleston church. I've seen our scientists help a paralyzed man regain his sense of touch. And our wounded warriors walk again. I've seen our doctors and volunteers rebuild after earthquakes and stop pandemics in their tracks. I've learned from students who are building robots and curing diseases and who will change the world in ways we can't even imagine. I've seen the youngest of children remind us of our obligations to care for our refugees. To work in peace and, above all, to look out for each other. That's what's possible when we come together in the slow, hard, sometimes frustrating, but always vital work of self-government. But we can't take our democracy for granted. All of us, regardless of party, should throw ourselves into the work of citizenship. Not just when there's an election. Not just when our own narrow interest is at stake. But over the full span of a lifetime. If you're tired of arguing with strangers on the internet, try to talk with one in real life. If something needs fixing, lace up your shoes and do some organizing. If you're disappointed by your elected officials, then grab a clipboard, get some signatures, and run for office yourself. Our success depends on our participation. Regardless of which way the pendulum of power swings, it falls on each of us to be guardians of our democracy. To embrace the joyous task we've been given to continually try to improve this great nation of ours. Because for all our outward differences, we all share the same proud title. Citizen. It has been the honor of my life to serve you as President. Eight years later, I am even more optimistic about our country's promise, and I look forward to working along your side as a citizen for all my days that remain. Thanks, everybody. God bless you, and God bless the United States of America.",
+        ]
+
+        self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
