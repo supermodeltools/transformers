@@ -331,7 +331,16 @@ def _build_checkpoint_conversion_mapping():
     mapping["ernie4_5_moe"] = mapping["qwen2_moe"].copy()
     mapping["ernie4_5_moe"] += [
         WeightRenaming("mlp.moe_statics.e_score_correction_bias", "mlp.gate.moe_statics.e_score_correction_bias"),
-        operations=[Force16BytesAlignment()]
+        WeightConverter(
+            source_patterns="mlp.experts.gate_up_proj$",
+            target_patterns="mlp.experts.gate_up_proj",
+            operations=[Force16BytesAlignment()],
+        ),
+        WeightConverter(
+            source_patterns="mlp.experts.down_proj$",
+            target_patterns="mlp.experts.down_proj",
+            operations=[Force16BytesAlignment()],
+        ),
     ]
     mapping["minimax_m2"] = mapping["mixtral"].copy()
     mapping["minimax_m2"] += [
@@ -339,6 +348,20 @@ def _build_checkpoint_conversion_mapping():
     ]
     mapping["exaone_moe"] = mapping["qwen2_moe"].copy()
     mapping["exaone_moe"] += [WeightRenaming("mlp.e_score_correction_bias", "mlp.gate.e_score_correction_bias")]
+
+    mapping["solar_open"] = mapping["qwen2_moe"].copy()
+    mapping["solar_open"] += [
+        WeightConverter(
+            source_patterns="mlp.experts.gate_up_proj$",
+            target_patterns="mlp.experts.gate_up_proj",
+            operations=[Force16BytesAlignment()],
+        ),
+        WeightConverter(
+            source_patterns="mlp.experts.down_proj$",
+            target_patterns="mlp.experts.down_proj",
+            operations=[Force16BytesAlignment()],
+        ),
+    ]
 
     mapping["qwen3_5_moe_text"] = mapping["qwen3_5_text"].copy()
     mapping["qwen3_5_moe_text"] += mapping["qwen2_moe"].copy()

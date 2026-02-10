@@ -1181,12 +1181,9 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
     # This flag signal that the model can be used as an efficient backend in TGI and vLLM
     # In practice, it means that they support attention (mask) interface functions, fully pass the kwargs
     # through all modules up to the Attention layer, can slice logits with Tensor, and have a default TP plan
-    _supports_attention_backend = False
-    _can_record_outputs = None
-
-    # Attributes used mainly in multimodal LLMs, though all models contain a valid field for these
-    # Possible values are: text, image, video, audio and time
-    input_modalities: str | list[str] = "text"  # most models are text
+    _supports_attention_backend: bool = False
+    # A mapping describing what outputs can be captured by `capture_outputs` decorator during the forward pass
+    _can_record_outputs: dict | None = None
 
     @property
     @torch._dynamo.allow_in_graph
